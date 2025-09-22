@@ -1,0 +1,7 @@
+venv/
+*.jpg
+*.png
+__pycache__/
+*.bin
+*.whl
+*.webp
