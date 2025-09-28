@@ -96,6 +96,6 @@ def decompress_and_reconstruct_image(input_compressed_path, output_image_path, i
 
 # Example usage
 if __name__ == "__main__":
-    input_compressed_path = "/home/matan/Documents/matan/LoRa_video/output_compressed.bin.zst"
+    input_compressed_path = "C:\\Users\\Matan\\Documents\\Matan\\LoRa_video\\output_compressed.bin.zst"
     output_image_path = "reconstructed_image.png"
     decompress_and_reconstruct_image(input_compressed_path, output_image_path)

@@ -70,7 +70,7 @@ def process_and_compress_image(input_path, output_path, percentile_pin=50):
     lap_abs = np.abs(lap)
     thresh = np.percentile(lap_abs, 95)
     _, img_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
-    binary_dir = "/home/matan/Documents/matan/LoRa_video/binary_img"
+    binary_dir = "C:\\Users\\Matan\\Documents\\Matan\\LoRa_video\\binary_img"
     os.makedirs(binary_dir, exist_ok=True)
     binary_path = os.path.join(binary_dir, os.path.splitext(os.path.basename(input_path))[0] + '_binary.png')
     success = cv2.imwrite(binary_path, img_binary)
@@ -134,6 +134,6 @@ def process_and_compress_image(input_path, output_path, percentile_pin=50):
 
 # Example usage
 if __name__ == "__main__":
-    input_path = "/home/matan/Documents/matan/LoRa_video/unnamed.webp"
+    input_path = "C:\\Users\\Matan\\Documents\\Matan\\LoRa_video\\test_img.jpg"
     output_path = "output_compressed.bin.zst"
     process_and_compress_image(input_path, output_path)
