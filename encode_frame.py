@@ -1,9 +1,8 @@
 import cv2
 import numpy as np
 import time
-import os
-import zlib
 import zstandard as zstd
+from decode_frame import decode_frame
 
 def simplify_boundary(boundary, epsilon=2.0):
     """
@@ -20,38 +19,35 @@ def simplify_boundary(boundary, epsilon=2.0):
     simp = cv2.approxPolyDP(boundary, epsilon=epsilon, closed=True)
     return simp.squeeze()
 
-def process_and_compress_image(input_path, output_path, percentile_pin=50):
+def encode_frame(frame, percentile_pin=50):
     """
-    Process an image to extract, simplify, and compress connected component boundaries.
+    Process a frame to extract, simplify, and compress connected component boundaries.
 
     The pipeline includes:
-    1. Load image, resize to 512x512, and convert to grayscale.
+    1. Resize to 512x512, convert to grayscale.
     2. Apply median filter for noise reduction.
     3. Apply CLAHE for contrast enhancement.
     4. Detect edges using Laplacian with adaptive threshold (top 5%).
     5. Extract and sort connected components (CCs) by area using findContours.
     6. Simplify boundaries of top percentile_pin% CCs.
-    7. Compress simplified points with zlib, including boundary lengths, and save to output_path.
-    8. Print timing and file size metrics.
+    7. Compress simplified points with Zstandard, including boundary lengths.
 
     Args:
-        input_path (str): Path to input image (e.g., JPG, PNG).
-        output_path (str): Path to save compressed binary file.
+        frame (np.ndarray): Input frame from camera.
         percentile_pin (float): Percentage of top CCs to process (e.g., 50 for top 50%).
 
     Returns:
-        None (prints timings, file sizes, and saves output file).
+        bytes: Compressed boundary data.
+        np.ndarray: Binary image.
+        list: Simplified polygons for reconstruction.
     """
     times = {}  # Store timing for each step
 
-    # Load image
+    # Resize and convert to grayscale
     start = time.time()
-    img = cv2.imread(input_path)
-    if img is None:
-        raise ValueError(f"Cannot read image: {input_path}")
-    img = cv2.resize(img, (512, 512), interpolation=cv2.INTER_AREA)  # Resize for consistency
-    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
-    times['load_image'] = time.time() - start
+    frame = cv2.resize(frame, (512, 512), interpolation=cv2.INTER_AREA)
+    img_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(frame.shape) == 3 else frame
+    times['preprocess'] = time.time() - start
 
     # Median filter to reduce noise
     start = time.time()
@@ -70,12 +66,6 @@ def process_and_compress_image(input_path, output_path, percentile_pin=50):
     lap_abs = np.abs(lap)
     thresh = np.percentile(lap_abs, 95)
     _, img_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
-    binary_dir = "C:\\Users\\Matan\\Documents\\Matan\\LoRa_video\\binary_img"
-    os.makedirs(binary_dir, exist_ok=True)
-    binary_path = os.path.join(binary_dir, os.path.splitext(os.path.basename(input_path))[0] + '_binary.png')
-    success = cv2.imwrite(binary_path, img_binary)
-    if not success:
-        print(f"Warning: Failed to save binary image at {binary_path}")
     times['edge_detection'] = time.time() - start
 
     # Trace boundaries with findContours
@@ -115,25 +105,47 @@ def process_and_compress_image(input_path, output_path, percentile_pin=50):
     compressed = zstd.ZstdCompressor(level=3).compress(data_to_compress)
     times['compression'] = time.time() - start
 
-    # Save compressed data to output file
-    with open(output_path, 'wb') as f:
-        f.write(compressed)
-
     # Print timing breakdown
     print("Timing breakdown (seconds):")
     for step, t in times.items():
         print(f"  {step}: {t:.4f}")
     print(f"Total time: {sum(times.values()):.4f}")
 
-    # Print file sizes
-    original_size = os.path.getsize(input_path)
-    compressed_size = os.path.getsize(output_path)
-    print(f"Original file size: {original_size} bytes")
-    print(f"Compressed file size: {compressed_size} bytes")
-    print(f"Compression ratio: {original_size / compressed_size:.2f}x" if compressed_size > 0 else "N/A")
+    # Print file sizes (since no file, use len(compressed))
+    compressed_size = len(compressed)
+    print(f"Compressed size: {compressed_size} bytes")
 
-# Example usage
+    return compressed, img_binary, simplified, (512, 512)
+
+
+# Example usage for live camera
 if __name__ == "__main__":
-    input_path = "C:\\Users\\Matan\\Documents\\Matan\\LoRa_video\\test_img.jpg"
-    output_path = "output_compressed.bin.zst"
-    process_and_compress_image(input_path, output_path)
+    cap = cv2.VideoCapture(0)  # 0 for default webcam
+    if not cap.isOpened():
+        raise RuntimeError("Failed to open webcam")
+    
+    frame_id = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        start_cycle = time.time()
+        compressed, img_binary, simplified, _ = encode_frame(frame, percentile_pin=50)
+        # Decode compressed data
+        reconstructed = decode_frame(compressed, image_shape=(512, 512))
+        cycle_time = time.time() - start_cycle
+        print(f"Full encode-decode cycle time: {cycle_time:.4f} seconds")
+        
+        # Display GUI
+        cv2.imshow("Original Frame", frame)
+        cv2.imshow("Binary Image", img_binary)
+        cv2.imshow("Reconstructed Image", reconstructed)
+        
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+        
+        frame_id += 1
+    
+    cap.release()
+    cv2.destroyAllWindows()

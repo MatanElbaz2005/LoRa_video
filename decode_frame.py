@@ -5,7 +5,7 @@ import os
 import zlib
 import zstandard as zstd
 
-def decompress_and_reconstruct_image(input_compressed_path, output_image_path, image_shape=(512, 512)):
+def decode_frame(compressed_data, image_shape=(512, 512)):
     """
     Decompress a zlib-compressed binary file of boundary points and reconstruct an image.
 
@@ -29,10 +29,6 @@ def decompress_and_reconstruct_image(input_compressed_path, output_image_path, i
 
     # Read and decompress input file
     start = time.time()
-    if not os.path.exists(input_compressed_path):
-        raise ValueError(f"Cannot find compressed file: {input_compressed_path}")
-    with open(input_compressed_path, 'rb') as f:
-        compressed_data = f.read()
     decompressed_data = zstd.ZstdDecompressor().decompress(compressed_data)
     times['decompression'] = time.time() - start
 
@@ -76,11 +72,6 @@ def decompress_and_reconstruct_image(input_compressed_path, output_image_path, i
             cv2.polylines(canvas, [contour], isClosed=True, color=255, thickness=1)
     times['draw_boundaries'] = time.time() - start
 
-    # Save reconstructed image as PNG
-    start = time.time()
-    cv2.imwrite(output_image_path, canvas)
-    times['save_image'] = time.time() - start
-
     # Print timing breakdown
     print("Timing breakdown (seconds):")
     for step, t in times.items():
@@ -88,14 +79,7 @@ def decompress_and_reconstruct_image(input_compressed_path, output_image_path, i
     print(f"Total time: {sum(times.values()):.4f}")
 
     # Print file sizes
-    compressed_size = os.path.getsize(input_compressed_path)
-    output_image_size = os.path.getsize(output_image_path)
-    print(f"Compressed input file size: {compressed_size} bytes")
-    print(f"Reconstructed image file size: {output_image_size} bytes")
-    print(f"Size ratio (compressed / image): {compressed_size / output_image_size:.2f}x" if output_image_size > 0 else "N/A")
+    compressed_size = len(compressed_data)
+    print(f"Compressed data size: {compressed_size} bytes")
 
-# Example usage
-if __name__ == "__main__":
-    input_compressed_path = "C:\\Users\\Matan\\Documents\\Matan\\LoRa_video\\output_compressed.bin.zst"
-    output_image_path = "reconstructed_image.png"
-    decompress_and_reconstruct_image(input_compressed_path, output_image_path)
+    return canvas
