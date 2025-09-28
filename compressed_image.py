@@ -70,8 +70,12 @@ def process_and_compress_image(input_path, output_path, percentile_pin=50):
     lap_abs = np.abs(lap)
     thresh = np.percentile(lap_abs, 95)
     _, img_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
-    input_to_binary = "/home/matan/Documents/matan/LoRa/binary_img2.png"
-    cv2.imwrite(input_to_binary, img_binary)
+    binary_dir = "/home/matan/Documents/matan/LoRa_video/binary_img"
+    os.makedirs(binary_dir, exist_ok=True)
+    binary_path = os.path.join(binary_dir, os.path.splitext(os.path.basename(input_path))[0] + '_binary.png')
+    success = cv2.imwrite(binary_path, img_binary)
+    if not success:
+        print(f"Warning: Failed to save binary image at {binary_path}")
     times['edge_detection'] = time.time() - start
 
     # Trace boundaries with findContours
@@ -130,6 +134,6 @@ def process_and_compress_image(input_path, output_path, percentile_pin=50):
 
 # Example usage
 if __name__ == "__main__":
-    input_path = "/home/matan/Documents/matan/LoRa/flat,750x,075,f-pad,750x1000,f8f8f8.u1.webp"
+    input_path = "/home/matan/Documents/matan/LoRa_video/unnamed.webp"
     output_path = "output_compressed.bin.zst"
     process_and_compress_image(input_path, output_path)
