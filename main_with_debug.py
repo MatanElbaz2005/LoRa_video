@@ -3,7 +3,7 @@ import numpy as np
 import time
 import zstandard as zstd
 from decode_frame import decode_frame
-from gui_helpers import build_dashboard
+from gui_helpers import build_dashboard, ControlState, render_controls, handle_controls_click, controls_to_params
 
 def simplify_boundary(boundary, epsilon=2.0):
     """
@@ -28,7 +28,11 @@ def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
     upper = int(min(255, (1.0 + sigma) * v))
     return cv2.Canny(img_u8, lower, upper, apertureSize=aperture_size, L2gradient=l2)
 
-def encode_frame(frame, percentile_pin=50):
+def encode_frame(frame, percentile_pin=50,
+                 canny_sigma=0.33, canny_aperture=3, canny_l2=True,
+                 lap_percentile=95, median_ksize=3,
+                 contour_mode=cv2.RETR_CCOMP, contour_method=cv2.CHAIN_APPROX_SIMPLE):
+
     """
     Process a frame to extract, simplify, and compress connected component boundaries.
 
@@ -61,7 +65,7 @@ def encode_frame(frame, percentile_pin=50):
 
     # Median filter to reduce noise
     start = time.time()
-    img_median = cv2.medianBlur(img_gray, 3)
+    img_median = cv2.medianBlur(img_gray, int(median_ksize))
     times['median_filter'] = time.time() - start
 
     # Apply real CLAHE for adaptive contrast enhancement
@@ -77,11 +81,16 @@ def encode_frame(frame, percentile_pin=50):
     # normalize for visualization (0..255)
     lap_norm = cv2.normalize(lap_abs, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
     lap_vis = lap_norm.astype(np.uint8)
-    thresh = np.percentile(lap_abs, 95)
+    thresh = np.percentile(lap_abs, float(lap_percentile))
     _, lap_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
 
     # Canny edge detection
-    edges_canny = auto_canny(cv2.GaussianBlur(img_clahe, (3, 3), 0), 0.01)
+    edges_canny = auto_canny(
+        cv2.GaussianBlur(img_clahe, (3, 3), 0),
+        sigma=float(canny_sigma),
+        aperture_size=int(canny_aperture),
+        l2=bool(canny_l2)
+    )
 
     # Combine Laplacian and Canny with OR (any edge from either)
     img_binary = cv2.bitwise_or(lap_binary, edges_canny)
@@ -97,7 +106,7 @@ def encode_frame(frame, percentile_pin=50):
 
     # Trace boundaries with findContours
     start = time.time()
-    contours, _ = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(img_binary, int(contour_mode), int(contour_method))
     valid_contours = [c.squeeze().astype(np.float32) for c in contours if len(c) > 2]
     areas = [cv2.contourArea(c) for c in contours if len(c) > 2]
     num_ccs = len(valid_contours)
@@ -158,7 +167,11 @@ if __name__ == "__main__":
     cap = cv2.VideoCapture(0)  # 0 for default webcam
     if not cap.isOpened():
         raise RuntimeError("Failed to open webcam")
-    
+    # Custom controls window (pretty panel)
+    cv2.namedWindow("Controls", cv2.WINDOW_NORMAL)
+    state = ControlState()
+    cv2.setMouseCallback("Controls", handle_controls_click, state)
+    cv2.resizeWindow("Controls", 640, 540)
     frame_id = 0
     while True:
         ret, frame = cap.read()
@@ -166,7 +179,27 @@ if __name__ == "__main__":
             break
         
         start_cycle = time.time()
-        compressed, img_binary, simplified, out_shape, im = encode_frame(frame, percentile_pin=50)
+        # read params from the pretty control panel state
+        params = controls_to_params(state)
+        sigma          = params["canny_sigma"]
+        aperture       = params["canny_aperture"]
+        l2_val         = params["canny_l2"]
+        lap_pct        = params["lap_percentile"]
+        median_ksize   = params["median_ksize"]
+        contour_mode   = params["contour_mode"]
+        contour_method = params["contour_method"]
+
+        compressed, img_binary, simplified, out_shape, im = encode_frame(
+            frame, percentile_pin=50,
+            canny_sigma=sigma,
+            canny_aperture=aperture,
+            canny_l2=bool(l2_val),
+            lap_percentile=int(lap_pct),
+            median_ksize=int(median_ksize),
+            contour_mode=contour_mode,
+            contour_method=contour_method
+        )
+
         # Decode compressed data
         reconstructed = decode_frame(compressed, image_shape=out_shape)
 
@@ -187,9 +220,23 @@ if __name__ == "__main__":
             "OR Laplacian Canny (closed)",
             "Reconstructed"
         ]
-        dashboard = build_dashboard(tiles, titles, cols=3, tile_size=(256, 256), pad=10)
-
+        dashboard = build_dashboard(
+            tiles, titles,
+            cols=3,
+            tile_size=(300, 220),
+            pad=16,
+            bg_color=(24, 24, 28),
+            title_bar_h=28,
+            title_fg=(235, 235, 240),
+            title_bg=(40, 40, 48),
+            card_radius=10,
+            shadow=3,
+        )
+        controls_img = render_controls(state)
+        cv2.imshow("Controls", controls_img)
+        cv2.namedWindow("Pipeline Dashboard", cv2.WINDOW_NORMAL)
         cv2.imshow("Pipeline Dashboard", dashboard)
+
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
