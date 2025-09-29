@@ -67,7 +67,11 @@ def encode_frame(frame, percentile_pin=50):
     thresh = np.percentile(lap_abs, 95)
     _, img_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
     times['edge_detection'] = time.time() - start
-
+    # Morphology close
+    start = time.time()
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    img_binary = cv2.morphologyEx(img_binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    times['morph_close'] = time.time() - start
     # Trace boundaries with findContours
     start = time.time()
     contours, _ = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
