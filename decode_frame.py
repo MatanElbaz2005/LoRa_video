@@ -78,8 +78,4 @@ def decode_frame(compressed_data, image_shape=(512, 512)):
         print(f"  {step}: {t:.4f}")
     print(f"Total time: {sum(times.values()):.4f}")
 
-    # Print file sizes
-    compressed_size = len(compressed_data)
-    print(f"Compressed data size: {compressed_size} bytes")
-
     return canvas
