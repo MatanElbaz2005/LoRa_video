@@ -51,7 +51,8 @@ def encode_frame(frame, percentile_pin=50):
         list: Simplified polygons for reconstruction.
     """
     times = {}  # Store timing for each step
-
+    orig_bgr = frame.copy()
+    
     # Resize and convert to grayscale
     start = time.time()
     frame = cv2.resize(frame, (512, 512), interpolation=cv2.INTER_AREA)
@@ -143,12 +144,10 @@ def encode_frame(frame, percentile_pin=50):
 
     # Collect intermediates for GUI
     intermediates = {
-        'img_median': img_median,
-        'img_clahe': img_clahe,
-        'laplacian': lap_vis,             # 0..255 uint8 visualization
+        'orig_bgr': orig_bgr,
         'lap_binary': lap_binary,         # Laplacian-only edges (after threshold)
         'edges_canny': edges_canny,       # Canny-only edges
-        'binary_or_raw': img_binary_raw,  # OR (Laplacian ∪ Canny) before closing
+        'binary_or_raw': img_binary_raw,  # OR (Laplacian Canny) before closing
         'binary_closed': img_binary_closed
     }
     return compressed, img_binary, simplified, (512, 512), intermediates
@@ -173,9 +172,7 @@ if __name__ == "__main__":
 
         # Build a single dashboard image (all in one window)
         tiles = [
-            im['img_median'],
-            im['img_clahe'],
-            im['laplacian'],       # visualization of |Laplacian|
+            im['orig_bgr'],
             im['lap_binary'],      # Laplacian-only (binary)
             im['edges_canny'],     # Canny-only (binary)
             im['binary_or_raw'],   # OR (before closing)
@@ -183,9 +180,7 @@ if __name__ == "__main__":
             reconstructed
         ]
         titles = [
-            "Median (gray)",
-            "CLAHE (gray)",
-            "Laplacian |abs| (0..255)",
+            "Original (BGR)",
             "Laplacian (binary)",
             "Canny (binary)",
             "OR Laplacian Canny (raw)",
