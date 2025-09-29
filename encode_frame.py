@@ -19,6 +19,13 @@ def simplify_boundary(boundary, epsilon=2.0):
     simp = cv2.approxPolyDP(boundary, epsilon=epsilon, closed=True)
     return simp.squeeze()
 
+def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
+               aperture_size: int = 3, l2: bool = True) -> np.ndarray:
+    v = np.median(img_u8)
+    lower = int(max(0, (1.0 - sigma) * v))
+    upper = int(min(255, (1.0 + sigma) * v))
+    return cv2.Canny(img_u8, lower, upper, apertureSize=aperture_size, L2gradient=l2)
+
 def encode_frame(frame, percentile_pin=50):
     """
     Process a frame to extract, simplify, and compress connected component boundaries.
@@ -65,8 +72,15 @@ def encode_frame(frame, percentile_pin=50):
     lap = cv2.Laplacian(img_clahe, cv2.CV_64F)
     lap_abs = np.abs(lap)
     thresh = np.percentile(lap_abs, 95)
-    _, img_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
+    _, lap_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
+
+    # Canny edge detection
+    edges_canny = auto_canny(cv2.GaussianBlur(img_clahe, (3, 3), 0))
+
+    # Combine Laplacian and Canny with OR (any edge from either)
+    img_binary = cv2.bitwise_or(lap_binary, edges_canny)
     times['edge_detection'] = time.time() - start
+
     # Morphology close
     start = time.time()
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
