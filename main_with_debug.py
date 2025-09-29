@@ -20,6 +20,14 @@ def simplify_boundary(boundary, epsilon=2.0):
     simp = cv2.approxPolyDP(boundary, epsilon=epsilon, closed=True)
     return simp.squeeze()
 
+def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
+               aperture_size: int = 3, l2: bool = True) -> np.ndarray:
+    # Compute robust thresholds from image median
+    v = np.median(img_u8)
+    lower = int(max(0, (1.0 - sigma) * v))
+    upper = int(min(255, (1.0 + sigma) * v))
+    return cv2.Canny(img_u8, lower, upper, apertureSize=aperture_size, L2gradient=l2)
+
 def encode_frame(frame, percentile_pin=50):
     """
     Process a frame to extract, simplify, and compress connected component boundaries.
@@ -65,10 +73,17 @@ def encode_frame(frame, percentile_pin=50):
     start = time.time()
     lap = cv2.Laplacian(img_clahe, cv2.CV_64F)
     lap_abs = np.abs(lap)
-    # for visualization, normalize laplacian magnitude to 0..255 (uint8)
-    lap_vis = cv2.normalize(lap_abs, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    thresh = int(np.percentile(lap_abs, 95))
-    _, img_binary = cv2.threshold(lap_abs.astype(np.uint8), thresh, 255, cv2.THRESH_BINARY)
+    # normalize for visualization (0..255)
+    lap_norm = cv2.normalize(lap_abs, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+    lap_vis = lap_norm.astype(np.uint8)
+    thresh = np.percentile(lap_abs, 95)
+    _, lap_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
+
+    # Canny edge detection
+    edges_canny = auto_canny(cv2.GaussianBlur(img_clahe, (3, 3), 0), 0.01)
+
+    # Combine Laplacian and Canny with OR (any edge from either)
+    img_binary = cv2.bitwise_or(lap_binary, edges_canny)
     times['edge_detection'] = time.time() - start
 
     # Morphology close
@@ -130,8 +145,10 @@ def encode_frame(frame, percentile_pin=50):
     intermediates = {
         'img_median': img_median,
         'img_clahe': img_clahe,
-        'laplacian': lap_vis,            # 0..255 uint8 visualization
-        'binary_thresh': img_binary_raw, # before close
+        'laplacian': lap_vis,             # 0..255 uint8 visualization
+        'lap_binary': lap_binary,         # Laplacian-only edges (after threshold)
+        'edges_canny': edges_canny,       # Canny-only edges
+        'binary_or_raw': img_binary_raw,  # OR (Laplacian ∪ Canny) before closing
         'binary_closed': img_binary_closed
     }
     return compressed, img_binary, simplified, (512, 512), intermediates
@@ -158,17 +175,21 @@ if __name__ == "__main__":
         tiles = [
             im['img_median'],
             im['img_clahe'],
-            im['laplacian'],
-            im['binary_thresh'],
-            im['binary_closed'],
+            im['laplacian'],       # visualization of |Laplacian|
+            im['lap_binary'],      # Laplacian-only (binary)
+            im['edges_canny'],     # Canny-only (binary)
+            im['binary_or_raw'],   # OR (before closing)
+            im['binary_closed'],   # OR (after closing)
             reconstructed
         ]
         titles = [
             "Median (gray)",
             "CLAHE (gray)",
             "Laplacian |abs| (0..255)",
-            "Binary after threshold",
-            "Binary after closing",
+            "Laplacian (binary)",
+            "Canny (binary)",
+            "OR Laplacian Canny (raw)",
+            "OR Laplacian Canny (closed)",
             "Reconstructed"
         ]
         dashboard = build_dashboard(tiles, titles, cols=3, tile_size=(256, 256), pad=10)
