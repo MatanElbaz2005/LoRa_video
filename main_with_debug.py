@@ -30,7 +30,7 @@ def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
 
 def encode_frame(frame, percentile_pin=50,
                  canny_sigma=0.33, canny_aperture=3, canny_l2=True,
-                 lap_percentile=95, median_ksize=3,
+                 lap_percentile=95, median_ksize=3, scharr_percentile=92,
                  contour_mode=cv2.RETR_CCOMP, contour_method=cv2.CHAIN_APPROX_SIMPLE):
 
     """
@@ -92,11 +92,21 @@ def encode_frame(frame, percentile_pin=50,
         l2=bool(canny_l2)
     )
 
-    # Combine Laplacian and Canny with OR (any edge from either)
-    img_binary = cv2.bitwise_or(lap_binary, edges_canny)
+    # OR of Laplacian + Canny ONLY (for separate reconstruction)
+    img_binary_lc = cv2.bitwise_or(lap_binary, edges_canny)
+
+    # Scharr magnitude + percentile threshold (sensitive to fine facial details)
+    gx = cv2.Scharr(img_clahe, cv2.CV_32F, 1, 0)
+    gy = cv2.Scharr(img_clahe, cv2.CV_32F, 0, 1)
+    scharr_mag = cv2.magnitude(gx, gy)
+    scharr_t = np.percentile(scharr_mag, float(scharr_percentile))
+    scharr_bin = (scharr_mag >= scharr_t).astype(np.uint8) * 255
+
+    # Combine Laplacian, Canny, and Scharr with OR
+    img_binary = cv2.bitwise_or(img_binary_lc, scharr_bin)
     times['edge_detection'] = time.time() - start
 
-    # Morphology close
+    # Morphology close (ALL = Lap+Canny+Scharr)
     img_binary_raw = img_binary.copy()
     start = time.time()
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -104,42 +114,60 @@ def encode_frame(frame, percentile_pin=50,
     times['morph_close'] = time.time() - start
     img_binary_closed = img_binary  # alias for clarity in GUI
 
-    # Trace boundaries with findContours
+    # Trace & compress for ALL (Lap + Canny + Scharr)
     start = time.time()
-    contours, _ = cv2.findContours(img_binary, int(contour_mode), int(contour_method))
-    valid_contours = [c.squeeze().astype(np.float32) for c in contours if len(c) > 2]
-    areas = [cv2.contourArea(c) for c in contours if len(c) > 2]
-    num_ccs = len(valid_contours)
+    contours_all, _ = cv2.findContours(img_binary_closed, int(contour_mode), int(contour_method))
+    valid_contours_all = [c.squeeze().astype(np.float32) for c in contours_all if len(c) > 2]
+    areas_all = [cv2.contourArea(c) for c in contours_all if len(c) > 2]
+    num_ccs_all = len(valid_contours_all)
 
-    # Sort by area (descending)
-    sorted_idx = np.argsort(areas)[::-1]
-    sorted_boundaries = [valid_contours[i] for i in sorted_idx]
-    times['tracing_sorting'] = time.time() - start
+    sorted_idx_all = np.argsort(areas_all)[::-1]
+    sorted_boundaries_all = [valid_contours_all[i] for i in sorted_idx_all]
+    max_trace_all = max(1, int(num_ccs_all * (percentile_pin / 100)))
+    boundaries_all = sorted_boundaries_all[:max_trace_all]
 
-    # Pin to top percentile (e.g., 50%)
-    start = time.time()
-    max_trace = max(1, int(num_ccs * (percentile_pin / 100)))
-    boundaries = sorted_boundaries[:max_trace]
-
-    # Simplify boundaries
-    simplified = [simplify_boundary(b, epsilon=2.0) for b in boundaries]
-    # Filter out invalid simplified contours (e.g., < 3 points)
+    simplified = [simplify_boundary(b, epsilon=2.0) for b in boundaries_all]
     simplified = [s for s in simplified if len(s.shape) == 2 and s.shape[0] >= 3]
-    times['simplification'] = time.time() - start
 
-    # Prepare data for compression: store number of boundaries and lengths
-    start = time.time()
+    start_comp_all = time.time()
     if simplified:
         num_boundaries = len(simplified)
         boundary_lengths = [len(b) for b in simplified]
         all_points = np.vstack(simplified).astype(np.int16)
-        # Create header: num_boundaries (int32) + lengths (int32 array)
         header = np.array([num_boundaries] + boundary_lengths, dtype=np.int32)
         data_to_compress = header.tobytes() + all_points.tobytes()
     else:
         data_to_compress = np.array([], dtype=np.int16).tobytes()
     compressed = zstd.ZstdCompressor(level=3).compress(data_to_compress)
-    times['compression'] = time.time() - start
+    times['compression_all'] = time.time() - start_comp_all
+
+    # Morphology close for Lap+Canny ONLY (for separate reconstruction)
+    img_binary_lc_raw = img_binary_lc.copy()
+    img_binary_lc_closed = cv2.morphologyEx(img_binary_lc, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+    # Trace & compress for Lap+Canny ONLY
+    start = time.time()
+    contours_lc, _ = cv2.findContours(img_binary_lc_closed, int(contour_mode), int(contour_method))
+    valid_contours_lc = [c.squeeze().astype(np.float32) for c in contours_lc if len(c) > 2]
+    areas_lc = [cv2.contourArea(c) for c in contours_lc if len(c) > 2]
+    num_ccs_lc = len(valid_contours_lc)
+    sorted_idx_lc = np.argsort(areas_lc)[::-1]
+    sorted_boundaries_lc = [valid_contours_lc[i] for i in sorted_idx_lc]
+    max_trace_lc = max(1, int(num_ccs_lc * (percentile_pin / 100)))
+    boundaries_lc = sorted_boundaries_lc[:max_trace_lc]
+    simplified_lc = [simplify_boundary(b, epsilon=2.0) for b in boundaries_lc]
+    simplified_lc = [s for s in simplified_lc if len(s.shape) == 2 and s.shape[0] >= 3]
+
+    if simplified_lc:
+        num_boundaries_lc = len(simplified_lc)
+        boundary_lengths_lc = [len(b) for b in simplified_lc]
+        all_points_lc = np.vstack(simplified_lc).astype(np.int16)
+        header_lc = np.array([num_boundaries_lc] + boundary_lengths_lc, dtype=np.int32)
+        data_to_compress_lc = header_lc.tobytes() + all_points_lc.tobytes()
+    else:
+        data_to_compress_lc = np.array([], dtype=np.int16).tobytes()
+    compressed_lc = zstd.ZstdCompressor(level=3).compress(data_to_compress_lc)
+    times['compression_lc'] = time.time() - start
 
     # Print timing breakdown
     print("Timing breakdown (seconds):")
@@ -148,18 +176,22 @@ def encode_frame(frame, percentile_pin=50,
     print(f"Total time: {sum(times.values()):.4f}")
 
     # Print file sizes (since no file, use len(compressed))
-    compressed_size = len(compressed)
-    print(f"Compressed size: {compressed_size} bytes")
+    print(f"Compressed size (ALL): {len(compressed)} bytes")
+    print(f"Compressed size (Lap+Canny): {len(compressed_lc)} bytes")
 
     # Collect intermediates for GUI
     intermediates = {
         'orig_bgr': orig_bgr,
-        'lap_binary': lap_binary,         # Laplacian-only edges (after threshold)
-        'edges_canny': edges_canny,       # Canny-only edges
-        'binary_or_raw': img_binary_raw,  # OR (Laplacian Canny) before closing
-        'binary_closed': img_binary_closed
+        'lap_binary': lap_binary,
+        'edges_canny': edges_canny,
+        'edges_scharr': scharr_bin,
+        'binary_or_raw': img_binary_raw,              # ALL (before close)
+        'binary_closed': img_binary_closed,           # ALL (after close)
+        'binary_lc_raw': img_binary_lc_raw,           # NEW: Lap+Canny only (before close)
+        'binary_lc_closed': img_binary_lc_closed      # NEW: Lap+Canny only (after close)
     }
-    return compressed, img_binary, simplified, (512, 512), intermediates
+    return compressed, img_binary, simplified, (512, 512), intermediates, compressed_lc
+
 
 
 # Example usage for live camera
@@ -189,7 +221,7 @@ if __name__ == "__main__":
         contour_mode   = params["contour_mode"]
         contour_method = params["contour_method"]
 
-        compressed, img_binary, simplified, out_shape, im = encode_frame(
+        compressed, img_binary, simplified, out_shape, im, compressed_lc = encode_frame(
             frame, percentile_pin=50,
             canny_sigma=sigma,
             canny_aperture=aperture,
@@ -202,22 +234,27 @@ if __name__ == "__main__":
 
         # Decode compressed data
         reconstructed = decode_frame(compressed, image_shape=out_shape)
+        reconstructed_lc = decode_frame(compressed_lc, image_shape=out_shape)
 
         # Build a single dashboard image (all in one window)
         tiles = [
             im['orig_bgr'],
-            im['lap_binary'],      # Laplacian-only (binary)
-            im['edges_canny'],     # Canny-only (binary)
-            im['binary_or_raw'],   # OR (before closing)
-            im['binary_closed'],   # OR (after closing)
+            im['lap_binary'],
+            im['edges_canny'],
+            im['edges_scharr'],
+            im['binary_or_raw'],
+            im['binary_lc_closed'],
+            reconstructed_lc,
             reconstructed
         ]
         titles = [
             "Original (BGR)",
             "Laplacian (binary)",
             "Canny (binary)",
-            "OR Laplacian Canny (raw)",
-            "OR Laplacian Canny (closed)",
+            "Scharr (binary)",
+            "OR Lap+Canny+Scharr (raw)",
+            "OR Lap+Canny (closed)",
+            "Reconstructed (Lap+Canny)",
             "Reconstructed"
         ]
         dashboard = build_dashboard(
