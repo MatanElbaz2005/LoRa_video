@@ -26,7 +26,7 @@ def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
     upper = int(min(255, (1.0 + sigma) * v))
     return cv2.Canny(img_u8, lower, upper, apertureSize=aperture_size, L2gradient=l2)
 
-def encode_frame(frame, percentile_pin=50):
+def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     """
     Process a frame to extract, simplify, and compress connected component boundaries.
 
@@ -34,7 +34,7 @@ def encode_frame(frame, percentile_pin=50):
     1. Resize to 512x512, convert to grayscale.
     2. Apply median filter for noise reduction.
     3. Apply CLAHE for contrast enhancement.
-    4. Detect edges using Laplacian with adaptive threshold (top 5%).
+    4. Detect edges using Laplacian (percentile), Canny (auto), and Scharr (percentile), then OR-combine.
     5. Extract and sort connected components (CCs) by area using findContours.
     6. Simplify boundaries of top percentile_pin% CCs.
     7. Compress simplified points with Zstandard, including boundary lengths.
@@ -77,8 +77,15 @@ def encode_frame(frame, percentile_pin=50):
     # Canny edge detection
     edges_canny = auto_canny(cv2.GaussianBlur(img_clahe, (3, 3), 0))
 
-    # Combine Laplacian and Canny with OR (any edge from either)
-    img_binary = cv2.bitwise_or(lap_binary, edges_canny)
+    # NEW: Scharr magnitude + percentile threshold (sensitive to fine internal details)
+    gx = cv2.Scharr(img_clahe, cv2.CV_32F, 1, 0)
+    gy = cv2.Scharr(img_clahe, cv2.CV_32F, 0, 1)
+    scharr_mag = cv2.magnitude(gx, gy)
+    scharr_t = np.percentile(scharr_mag, float(scharr_percentile))
+    scharr_bin = (scharr_mag >= scharr_t).astype(np.uint8) * 255
+
+    # Combine Laplacian, Canny, and Scharr with OR
+    img_binary = cv2.bitwise_or(cv2.bitwise_or(lap_binary, edges_canny), scharr_bin)
     times['edge_detection'] = time.time() - start
 
     # Morphology close
@@ -149,7 +156,7 @@ if __name__ == "__main__":
             break
         
         start_cycle = time.time()
-        compressed, img_binary, simplified, _ = encode_frame(frame, percentile_pin=50)
+        compressed, img_binary, simplified, _ = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
         # Decode compressed data
         reconstructed = decode_frame(compressed, image_shape=(512, 512))
         cycle_time = time.time() - start_cycle
