@@ -123,6 +123,12 @@ class ControlState:
     canny_sigma_x100: int = 33
     lap_percentile: int = 95
 
+    # --- NEW: Scharr controls ---
+    scharr_percentile: int = 90          # 70..99 recommended
+    scharr_preblur_x10: int = 3          # maps to 0.0..1.5 (0..15)
+    scharr_unsharp_x10: int = 10         # maps to 0.0..1.5 (0..15), default 1.0
+    scharr_mag_l2: bool = True           # True="l2", False="l1"
+
     # dragging state
     dragging: bool = False
     drag_target: str | None = None
@@ -220,6 +226,27 @@ def render_controls(state: ControlState) -> np.ndarray:
         _button(panel, PAD+160 + i*92, y-22, 90, 28, label,
                 active=(state.contour_method_idx==idx), name=f"meth_{idx}")
 
+    y += ROW_H
+    _label(panel, "Scharr:", (PAD, y))
+    # Magnitude toggle (L2/L1)
+    _button(panel, PAD+90, y-22, 86, 28,
+            "Mag L2" if state.scharr_mag_l2 else "Mag L1",
+            active=state.scharr_mag_l2, name="scharr_mag_toggle")
+
+    y += ROW_H
+    # Percentile (70..99)
+    _slider(panel, "scharr_pct", PAD+90, y-22, 320, 28, "Percentile",
+            float(state.scharr_percentile), 70.0, 99.0, "{:.0f}")
+
+    y += ROW_H
+    # Pre-blur sigma (0.0..1.5) mapped from 0..15
+    _slider(panel, "scharr_pre", PAD+90, y-22, 320, 28, "Preblur σ",
+            state.scharr_preblur_x10/10.0, 0.0, 1.5, "{:.1f}")
+
+    y += ROW_H
+    # Unsharp amount (0.0..1.5) mapped from 0..15
+    _slider(panel, "scharr_unsharp", PAD+90, y-22, 320, 28, "Unsharp amt",
+            state.scharr_unsharp_x10/10.0, 0.0, 1.5, "{:.1f}")
 
     return panel
 
@@ -230,11 +257,11 @@ def handle_controls_click(event, x, y, flags, state: ControlState):
                 return True
         return False
 
-    # start drag
     if event == cv2.EVENT_LBUTTONDOWN:
         # sliders
         for n,(x0,y0,x1,y1) in _HITBOXES:
-            if n in ("sigma_track","lap_track") and x0 <= x <= x1 and y0 <= y <= y1:
+            if n in ("sigma_track","lap_track","scharr_pct_track","scharr_pre_track","scharr_unsharp_track") \
+               and x0 <= x <= x1 and y0 <= y <= y1:
                 state.dragging = True
                 state.drag_target = n
                 break
@@ -252,9 +279,10 @@ def handle_controls_click(event, x, y, flags, state: ControlState):
                         state.contour_mode_idx = int(name.split("_")[1])
                     elif name.startswith("meth_"):
                         state.contour_method_idx = int(name.split("_")[1])
+                    elif name == "scharr_mag_toggle":                      # NEW
+                        state.scharr_mag_l2 = not state.scharr_mag_l2
                     break
 
-    # drag move
     elif event == cv2.EVENT_MOUSEMOVE and state.dragging and state.drag_target:
         # find track rect
         for n,(x0,y0,x1,y1) in _HITBOXES:
@@ -264,6 +292,12 @@ def handle_controls_click(event, x, y, flags, state: ControlState):
                     state.canny_sigma_x100 = max(1, min(100, int(round(1 + t * 99))))
                 elif n == "lap_track":
                     state.lap_percentile = max(50, min(99, int(round(50 + t * (99-50)))))
+                elif n == "scharr_pct_track":                               # NEW (70..99)
+                    state.scharr_percentile = max(70, min(99, int(round(70 + t * (99-70)))))
+                elif n == "scharr_pre_track":                               # NEW (0..15 -> 0.0..1.5)
+                    state.scharr_preblur_x10 = max(0, min(15, int(round(0 + t * 15))))
+                elif n == "scharr_unsharp_track":                           # NEW (0..15 -> 0.0..1.5)
+                    state.scharr_unsharp_x10 = max(0, min(15, int(round(0 + t * 15))))
                 break
 
     # end drag
@@ -288,7 +322,13 @@ def controls_to_params(state: ControlState) -> dict:
         "median_ksize": int(median_map.get(state.median_idx, 3)),
         "contour_mode": mode_map.get(state.contour_mode_idx, cv2.RETR_CCOMP),
         "contour_method": method_map.get(state.contour_method_idx, cv2.CHAIN_APPROX_SIMPLE),
+
+        "scharr_percentile": int(state.scharr_percentile),
+        "scharr_preblur_sigma": state.scharr_preblur_x10 / 10.0,
+        "scharr_unsharp_amount": state.scharr_unsharp_x10 / 10.0,
+        "scharr_magnitude": "l2" if state.scharr_mag_l2 else "l1",
     }
+
 
 
 def _slider(img, name, x, y, w, h, label, val, vmin, vmax, fmt):

@@ -5,6 +5,41 @@ import zstandard as zstd
 from decode_frame import decode_frame
 from gui_helpers import build_dashboard, ControlState, render_controls, handle_controls_click, controls_to_params
 
+def scharr_edges_u8(
+    img_u8: np.ndarray,
+    scharr_percentile: float = 90.0,
+    scharr_preblur_sigma: float = 0.0,
+    scharr_unsharp_amount: float = 1.0,
+    scharr_magnitude: str = "l2",
+    scharr_abs_threshold: float | None = None,
+    scharr_scale: float = 1.0
+) -> np.ndarray:
+    # Input: single-channel uint8 (0..255); Output: uint8 mask (0/255)
+    g = img_u8
+    if scharr_preblur_sigma and scharr_preblur_sigma > 0:
+        g = cv2.GaussianBlur(g, (0, 0), scharr_preblur_sigma)
+    if scharr_unsharp_amount and scharr_unsharp_amount > 0:
+        sigma_boost = max(0.6, scharr_preblur_sigma if scharr_preblur_sigma > 0 else 0.6)
+        blur_boost = cv2.GaussianBlur(g, (0, 0), sigma_boost)
+        g = cv2.addWeighted(g, 1.0 + scharr_unsharp_amount, blur_boost, -scharr_unsharp_amount, 0)
+        g = np.clip(g, 0, 255).astype(np.uint8)
+
+    gx = cv2.Scharr(g, cv2.CV_32F, 1, 0, scale=scharr_scale)
+    gy = cv2.Scharr(g, cv2.CV_32F, 0, 1, scale=scharr_scale)
+
+    if str(scharr_magnitude).lower() == "l1":
+        mag = np.abs(gx) + np.abs(gy)
+    else:
+        mag = cv2.magnitude(gx, gy)
+
+    if scharr_abs_threshold is not None:
+        t = float(scharr_abs_threshold)
+    else:
+        t = np.percentile(mag, float(scharr_percentile))
+
+    return (mag >= t).astype(np.uint8) * 255
+
+
 def simplify_boundary(boundary, epsilon=2.0):
     """
     Simplify a boundary using OpenCV's implementation of Ramer-Douglas-Peucker (RDP) algorithm.
@@ -30,7 +65,9 @@ def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
 
 def encode_frame(frame, percentile_pin=50,
                  canny_sigma=0.33, canny_aperture=3, canny_l2=True,
-                 lap_percentile=95, median_ksize=3, scharr_percentile=92,
+                 lap_percentile=95, median_ksize=3,
+                 scharr_percentile=90, scharr_preblur_sigma=0.3,
+                 scharr_unsharp_amount=1.0, scharr_magnitude="l2",
                  contour_mode=cv2.RETR_CCOMP, contour_method=cv2.CHAIN_APPROX_SIMPLE):
 
     """
@@ -96,11 +133,13 @@ def encode_frame(frame, percentile_pin=50,
     img_binary_lc = cv2.bitwise_or(lap_binary, edges_canny)
 
     # Scharr magnitude + percentile threshold (sensitive to fine facial details)
-    gx = cv2.Scharr(img_clahe, cv2.CV_32F, 1, 0)
-    gy = cv2.Scharr(img_clahe, cv2.CV_32F, 0, 1)
-    scharr_mag = cv2.magnitude(gx, gy)
-    scharr_t = np.percentile(scharr_mag, float(scharr_percentile))
-    scharr_bin = (scharr_mag >= scharr_t).astype(np.uint8) * 255
+    scharr_bin = scharr_edges_u8(
+        img_clahe,
+        scharr_percentile=float(scharr_percentile),
+        scharr_preblur_sigma=float(scharr_preblur_sigma),
+        scharr_unsharp_amount=float(scharr_unsharp_amount),
+        scharr_magnitude=str(scharr_magnitude)
+    )
 
     # Combine Laplacian, Canny, and Scharr with OR
     img_binary = cv2.bitwise_or(img_binary_lc, scharr_bin)
@@ -221,6 +260,12 @@ if __name__ == "__main__":
         contour_mode   = params["contour_mode"]
         contour_method = params["contour_method"]
 
+        # --- NEW: Scharr params from GUI ---
+        sch_pct        = params["scharr_percentile"]
+        sch_pre        = params["scharr_preblur_sigma"]
+        sch_unsharp    = params["scharr_unsharp_amount"]
+        sch_mag        = params["scharr_magnitude"]
+
         compressed, img_binary, simplified, out_shape, im, compressed_lc = encode_frame(
             frame, percentile_pin=50,
             canny_sigma=sigma,
@@ -228,6 +273,10 @@ if __name__ == "__main__":
             canny_l2=bool(l2_val),
             lap_percentile=int(lap_pct),
             median_ksize=int(median_ksize),
+            scharr_percentile=int(sch_pct),
+            scharr_preblur_sigma=float(sch_pre),
+            scharr_unsharp_amount=float(sch_unsharp),
+            scharr_magnitude=str(sch_mag),
             contour_mode=contour_mode,
             contour_method=contour_method
         )
