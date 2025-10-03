@@ -240,7 +240,7 @@ def render_controls(state: ControlState) -> np.ndarray:
 
     y += ROW_H
     # Pre-blur sigma (0.0..1.5) mapped from 0..15
-    _slider(panel, "scharr_pre", PAD+90, y-22, 320, 28, "Preblur σ",
+    _slider(panel, "scharr_pre", PAD+90, y-22, 320, 28, "Preblur",
             state.scharr_preblur_x10/10.0, 0.0, 1.5, "{:.1f}")
 
     y += ROW_H
