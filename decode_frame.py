@@ -73,9 +73,10 @@ def decode_frame(compressed_data, image_shape=(512, 512)):
     times['draw_boundaries'] = time.time() - start
 
     # Print timing breakdown
-    print("Timing breakdown (seconds):")
+    # print("Timing breakdown (seconds):")
     for step, t in times.items():
-        print(f"  {step}: {t:.4f}")
-    print(f"Total time: {sum(times.values()):.4f}")
+        # print(f"  {step}: {t:.4f}")
+        pass
+    # print(f"Total time: {sum(times.values()):.4f}")
 
     return canvas

@@ -131,10 +131,11 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times['compression'] = time.time() - start
 
     # Print timing breakdown
-    print("Timing breakdown (seconds):")
+    # print("Timing breakdown (seconds):")
     for step, t in times.items():
-        print(f"  {step}: {t:.4f}")
-    print(f"Total time: {sum(times.values()):.4f}")
+        # print(f"  {step}: {t:.4f}")
+        pass
+    # print(f"Total time: {sum(times.values()):.4f}")
 
     # Print file sizes (since no file, use len(compressed))
     compressed_size = len(compressed)
@@ -160,7 +161,7 @@ if __name__ == "__main__":
         # Decode compressed data
         reconstructed = decode_frame(compressed, image_shape=(512, 512))
         cycle_time = time.time() - start_cycle
-        print(f"Full encode-decode cycle time: {cycle_time:.4f} seconds")
+        # print(f"Full encode-decode cycle time: {cycle_time:.4f} seconds")
         
         # Display GUI
         cv2.imshow("Original Frame", frame)
