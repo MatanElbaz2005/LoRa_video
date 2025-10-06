@@ -141,6 +141,12 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     compressed_size = len(compressed)
     print(f"Compressed size: {compressed_size} bytes")
 
+    # Print detailed weight comparison (compressed vs raw frame)
+    compressed_kb = compressed_size / 1024
+    raw_kb = frame.nbytes / 1024
+    ratio = (compressed_kb / raw_kb) * 100 if raw_kb > 0 else 0
+    print(f"Compressed frame: {compressed_kb:.2f} KB (vs raw {raw_kb:.2f} KB, {ratio:.2f}% of original)")
+
     return compressed, img_binary, simplified, (512, 512)
 
 
