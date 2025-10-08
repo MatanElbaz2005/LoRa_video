@@ -198,6 +198,14 @@ if __name__ == "__main__":
         else:
             data_to_compress_d = np.array([], dtype=np.int16).tobytes()
         compressed_delta = zstd.ZstdCompressor(level=3).compress(data_to_compress_d)
+        # print delta weight (bytes + KB and ratio vs raw)
+        delta_bytes = len(compressed_delta)
+        print(f"Delta compressed size: {delta_bytes} bytes")
+
+        delta_kb = delta_bytes / 1024
+        raw_kb = frame.nbytes / 1024
+        delta_ratio = (delta_kb / raw_kb) * 100 if raw_kb > 0 else 0
+        print(f"Delta frame: {delta_kb:.2f} KB (vs raw {raw_kb:.2f} KB, {delta_ratio:.2f}% of original)")
 
         # DECODE DELTA
         reconstructed_delta, delta_canvas = decode_frame_delta(
