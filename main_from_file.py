@@ -5,7 +5,7 @@ import zstandard as zstd
 from decode_frame import decode_frame
 
 # =========[ Configure your input video here ]=========
-VIDEO_PATH = r"C:\\Users\\Matan\\Documents\\Matan\\3_eye_awareness\\videos\\19700101_002302.mp4"
+VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\moving_man.mp4"
 # =====================================================
 
 def simplify_boundary(boundary, epsilon=2.0):
