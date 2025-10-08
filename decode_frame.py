@@ -80,3 +80,22 @@ def decode_frame(compressed_data, image_shape=(512, 512)):
     # print(f"Total time: {sum(times.values()):.4f}")
 
     return canvas
+
+def decode_frame_delta(prev_canvas: np.ndarray, compressed_delta: bytes, image_shape=(512, 512)):
+    """
+    Decode a delta (contour XOR) and apply it over prev_canvas.
+    Returns:
+        updated_canvas: prev_canvas XOR delta_canvas
+        delta_canvas:   the drawn delta-only canvas (for debugging/vis)
+    """
+    # 1) Decode delta to a binary canvas (ממחזר את decode_frame)
+    delta_canvas = decode_frame(compressed_delta, image_shape=image_shape)
+
+    # 2) Apply XOR with the previous reconstructed canvas
+    if prev_canvas is None:
+        # first frame delta == full frame
+        updated = delta_canvas.copy()
+    else:
+        updated = cv2.bitwise_xor(prev_canvas, delta_canvas)
+
+    return updated, delta_canvas
