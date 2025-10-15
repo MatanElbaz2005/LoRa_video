@@ -99,7 +99,7 @@ def decode_frame_delta(prev_canvas: np.ndarray, compressed_delta: bytes, image_s
         updated_canvas: prev_canvas XOR delta_canvas
         delta_canvas:   the drawn delta-only canvas (for debugging/vis)
     """
-    # 1) Decode delta to a binary canvas (ממחזר את decode_frame)
+    # 1) Decode delta to a binary canvas
     delta_canvas = decode_frame(compressed_delta, image_shape=image_shape)
 
     # 2) Apply XOR with the previous reconstructed canvas

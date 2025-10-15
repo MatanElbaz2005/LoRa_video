@@ -178,21 +178,19 @@ if __name__ == "__main__":
             frame, percentile_pin=50, scharr_percentile=92
         )
         # DELTA (Contour XOR)
+        reconstructed_full = decode_frame(compressed_full, image_shape=(512, 512))
         if prev_edges is None:
-            delta_mask = img_binary.copy()
+            delta_mask = reconstructed_full.copy()
         else:
-            # XOR
-            delta_mask = cv2.bitwise_xor(img_binary, prev_edges)
+            delta_mask = cv2.bitwise_xor(reconstructed_full, prev_edges)
 
         contours_d, _ = cv2.findContours(delta_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
         valid_contours_d = [c.squeeze().astype(np.float32) for c in contours_d if len(c) > 2]
         areas_d = [cv2.contourArea(c) for c in contours_d if len(c) > 2]
         idx_d = np.argsort(areas_d)[::-1]
         sorted_boundaries_d = [valid_contours_d[i] for i in idx_d]
-        max_trace_d = max(1, int(len(sorted_boundaries_d) * (50 / 100)))
-        boundaries_d = sorted_boundaries_d[:max_trace_d]
-        simplified_d = [cv2.approxPolyDP(b.astype(np.float32), epsilon=2.0, closed=True).squeeze()
-                        for b in boundaries_d]
+        boundaries_d = sorted_boundaries_d
+        simplified_d = [b.astype(np.float32).squeeze() for b in boundaries_d]
         simplified_d = [s for s in simplified_d if isinstance(s, np.ndarray) and len(s.shape)==2 and s.shape[0] >= 3]
 
         if simplified_d:
