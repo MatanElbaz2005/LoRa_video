@@ -138,17 +138,6 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
         # print(f"  {step}: {t:.4f}")
         pass
     # print(f"Total time: {sum(times.values()):.4f}")
-
-    # Print file sizes (since no file, use len(compressed))
-    compressed_size = len(compressed)
-    print(f"Compressed size: {compressed_size} bytes")
-
-    # Print detailed weight comparison (compressed vs raw frame)
-    compressed_kb = compressed_size / 1024
-    raw_kb = frame.nbytes / 1024
-    ratio = (compressed_kb / raw_kb) * 100 if raw_kb > 0 else 0
-    print(f"Compressed frame: {compressed_kb:.2f} KB (vs raw {raw_kb:.2f} KB, {ratio:.2f}% of original)")
-
     return compressed, img_binary, simplified, (512, 512)
 
 
@@ -163,6 +152,17 @@ if __name__ == "__main__":
     print(f"[Sender] Connected to receiver on {HOST}:{PORT}")
     if not cap.isOpened():
         raise RuntimeError("Failed to open webcam")
+
+    # Consistent baseline (512x512x3) and helpers
+    H, W = 512, 512
+    RAW_BASELINE_BGR = H * W * 3  # bytes for 512x512x3
+    RAW_BASELINE_KB = RAW_BASELINE_BGR / 1024.0
+
+    def _fmt_kb(n_bytes: int) -> str:
+        return f"{n_bytes / 1024.0:.2f} KB"
+
+    def _pct(n_bytes: int, denom_bytes: int) -> str:
+        return f"{(n_bytes / denom_bytes) * 100.0:.2f}%"
     
     frame_id = 0
     prev_edges = None
@@ -176,6 +176,14 @@ if __name__ == "__main__":
         # FULL FRAME: encode + decode
         compressed_full, img_binary, simplified, _ = encode_frame(
             frame, percentile_pin=50, scharr_percentile=92
+        )
+
+        # FULL (hypothetical) payload size vs fixed baseline
+        full_bytes = len(compressed_full)
+        print(
+            f"[FULL] payload={full_bytes} B ({_fmt_kb(full_bytes)}) "
+            f"vs raw_512x512x3={RAW_BASELINE_KB:.2f} KB "
+            f"→ { _pct(full_bytes, RAW_BASELINE_BGR) } of raw"
         )
         # DELTA (Contour XOR)
         reconstructed_full = decode_frame(compressed_full, image_shape=(512, 512))
@@ -202,17 +210,30 @@ if __name__ == "__main__":
         else:
             data_to_compress_d = np.array([], dtype=np.int16).tobytes()
         compressed_delta = zstd.ZstdCompressor(level=3).compress(data_to_compress_d)
-        # Send delta over socket with 4-byte length header
-        data_len = struct.pack(">I", len(compressed_delta))
-        sock.sendall(data_len + compressed_delta)
-        # print delta weight (bytes + KB and ratio vs raw)
-        delta_bytes = len(compressed_delta)
-        print(f"Delta compressed size: {delta_bytes} bytes")
 
-        delta_kb = delta_bytes / 1024
-        raw_kb = frame.nbytes / 1024
-        delta_ratio = (delta_kb / raw_kb) * 100 if raw_kb > 0 else 0
-        print(f"Delta frame: {delta_kb:.2f} KB (vs raw {raw_kb:.2f} KB, {delta_ratio:.2f}% of original)")
+        # On-wire size includes 4B length header
+        payload_len = len(compressed_delta)
+        wire_len = 4 + payload_len
+        sock.sendall(struct.pack(">I", payload_len) + compressed_delta)
+
+        # Print DELTA consistently vs the same baseline (512x512x3)
+        print(
+            f"[DELTA] wire={wire_len} B ({_fmt_kb(wire_len)}) "
+            f"| payload={payload_len} B ({_fmt_kb(payload_len)}) "
+            f"vs raw_512x512x3={RAW_BASELINE_KB:.2f} KB "
+            f"→ { _pct(wire_len, RAW_BASELINE_BGR) } of raw"
+        )
+
+        # Also show how much we saved vs sending FULL for this frame
+        if full_bytes > 0:
+            savings_bytes = full_bytes - payload_len
+            savings_pct = 100.0 * (1.0 - (payload_len / full_bytes))
+            print(
+                f"[DELTA vs FULL] full_payload={_fmt_kb(full_bytes)} "
+                f"→ delta_payload={_fmt_kb(payload_len)} "
+                f"(saves {savings_bytes/1024.0:.2f} KB, {savings_pct:.1f}%)"
+            )
+
 
         # DECODE DELTA
         reconstructed_delta, delta_canvas = decode_frame_delta(
