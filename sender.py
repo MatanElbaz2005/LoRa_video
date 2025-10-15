@@ -185,6 +185,9 @@ if __name__ == "__main__":
             f"vs raw_512x512x3={RAW_BASELINE_KB:.2f} KB "
             f"→ { _pct(full_bytes, RAW_BASELINE_BGR) } of raw"
         )
+        # print number of full-frame contours (after top-% and simplify)
+        num_full_contours = len(simplified)
+        print(f"[FULL] contours={num_full_contours}")
         # DELTA (Contour XOR)
         reconstructed_full = decode_frame(compressed_full, image_shape=(512, 512))
         if prev_edges is None:
@@ -200,6 +203,10 @@ if __name__ == "__main__":
         boundaries_d = sorted_boundaries_d
         simplified_d = [b.astype(np.float32).squeeze() for b in boundaries_d]
         simplified_d = [s for s in simplified_d if isinstance(s, np.ndarray) and len(s.shape)==2 and s.shape[0] >= 3]
+
+        # print number of delta contours (after XOR, findContours, filtering)
+        num_delta_contours = len(simplified_d)
+        print(f"[DELTA] contours={num_delta_contours}")
 
         if simplified_d:
             num_boundaries_d = len(simplified_d)
