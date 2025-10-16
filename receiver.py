@@ -127,21 +127,59 @@ if __name__ == "__main__":
     while True:
         # --- Read 4-byte length header ---
         length_data = recv_exact(conn, 4)
-        if not length_data:
-            break
+        if not length_data: break
         msg_len = struct.unpack(">I", length_data)[0]
 
-        # --- Read compressed delta data ---
-        compressed_delta = recv_exact(conn, msg_len)
-        if not compressed_delta:
-            break
+        payload = recv_exact(conn, msg_len)
+        if not payload: break
 
-        # --- Decode and reconstruct ---
-        updated, delta_canvas = decode_frame_delta(prev_canvas, compressed_delta, image_shape=(512, 512))
-        prev_canvas = updated.copy()
+        # decompress the object-delta payload
+        decompressed = zstd.ZstdDecompressor().decompress(payload)
 
-        # --- Show reconstructed image ---
-        cv2.imshow("Reconstructed (Delta)", updated)
+        # parse: [1B FrameType][u16 Count][ops...]
+        p = 0
+        frame_type = decompressed[p:p+1]; p += 1
+        (count,) = struct.unpack_from(">H", decompressed, p); p += 2
+
+        # persistent map of id -> contour
+        if 'contours_by_id' not in globals():
+            contours_by_id = {}
+
+        for _ in range(count):
+            tag = decompressed[p:p+1]; p += 1
+            (cid,) = struct.unpack_from(">H", decompressed, p); p += 2
+
+            if tag == b"N":
+                (L,) = struct.unpack_from(">H", decompressed, p); p += 2
+                pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p)
+                p += 2*L*2
+                pts = pts.reshape(-1,2).astype(np.int32)
+                contours_by_id[cid] = pts
+
+            elif tag == b"D":
+                model = decompressed[p:p+1]; p += 1
+                if model == b"T":
+                    dx, dy = struct.unpack_from(">hh", decompressed, p); p += 4
+                    if cid in contours_by_id:
+                        c = contours_by_id[cid].copy()
+                        c[:,0] += dx; c[:,1] += dy
+                        contours_by_id[cid] = c
+                else:
+                    # reserved for future affine model
+                    pass
+
+            elif tag == b"X":
+                if cid in contours_by_id:
+                    contours_by_id.pop(cid)
+
+        # draw current frame from the map
+        canvas = np.zeros((512, 512), dtype=np.uint8)
+        for pts in contours_by_id.values():
+            cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
+
+        prev_canvas = canvas.copy()
+        cv2.imshow("Reconstructed (Object-Delta)", canvas)
+
         if cv2.waitKey(1) & 0xFF == 27:  # ESC to exit
             break
 

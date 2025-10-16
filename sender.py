@@ -155,8 +155,34 @@ if __name__ == "__main__":
 
     # Consistent baseline (512x512x3) and helpers
     H, W = 512, 512
-    RAW_BASELINE_BGR = H * W * 3  # bytes for 512x512x3
+    RAW_BASELINE_BGR = H * W * 3
     RAW_BASELINE_KB = RAW_BASELINE_BGR / 1024.0
+
+    # Object-Delta state & matching params
+    NEXT_ID = 1                      # counter for new contour IDs
+    prev_contours_by_id = {}         # id -> np.ndarray of points
+    MATCH_MAX_DIST = 12.0            # max centroid distance (pixels)
+    MATCH_MIN_IOU  = 0.15            # min IoU (tiny raster) to accept a match
+    REFRESH_MIN_IOU = 0.60
+
+    # --- helpers for matching ---
+    def _centroid(poly: np.ndarray) -> np.ndarray:
+        return np.mean(poly, axis=0) if poly.size else np.array([0.0, 0.0], dtype=np.float32)
+
+    def _small_mask(poly: np.ndarray, size=64) -> np.ndarray:
+        m = np.zeros((size, size), dtype=np.uint8)
+        if poly.ndim == 2 and poly.shape[0] >= 3:
+            pts = poly.copy()
+            pts[:,0] = np.clip(pts[:,0] * (size-1) / (W-1), 0, size-1)
+            pts[:,1] = np.clip(pts[:,1] * (size-1) / (H-1), 0, size-1)
+            cv2.fillPoly(m, [pts.astype(np.int32)], 255)
+        return m
+
+    def _iou(a: np.ndarray, b: np.ndarray) -> float:
+        inter = np.count_nonzero(cv2.bitwise_and(a, b))
+        union = np.count_nonzero(cv2.bitwise_or(a, b))
+        return (inter/union) if union else 0.0
+
 
     def _fmt_kb(n_bytes: int) -> str:
         return f"{n_bytes / 1024.0:.2f} KB"
@@ -177,84 +203,129 @@ if __name__ == "__main__":
         compressed_full, img_binary, simplified, _ = encode_frame(
             frame, percentile_pin=50, scharr_percentile=92
         )
+        curr_contours = simplified
 
         # FULL (hypothetical) payload size vs fixed baseline
         full_bytes = len(compressed_full)
-        print(
-            f"[FULL] payload={full_bytes} B ({_fmt_kb(full_bytes)}) "
-            f"vs raw_512x512x3={RAW_BASELINE_KB:.2f} KB "
-            f"→ { _pct(full_bytes, RAW_BASELINE_BGR) } of raw"
-        )
-        # print number of full-frame contours (after top-% and simplify)
         num_full_contours = len(simplified)
-        print(f"[FULL] contours={num_full_contours}")
-        # DELTA (Contour XOR)
-        reconstructed_full = decode_frame(compressed_full, image_shape=(512, 512))
-        if prev_edges is None:
-            delta_mask = reconstructed_full.copy()
+        # Build object-delta ops (N/D/X)
+        ops = []          # (tag, id, payload)
+        used_curr = set() # indices of curr_contours that were matched
+
+        if not prev_contours_by_id:
+            # I-frame: send all as NEW
+            for poly in curr_contours:
+                cid = NEXT_ID; NEXT_ID += 1
+                prev_contours_by_id[cid] = poly.copy()
+                ops.append(("N", cid, poly))
+            frame_type = b"I"
         else:
-            delta_mask = cv2.bitwise_xor(reconstructed_full, prev_edges)
+            # P-frame: match previous contours to current ones
+            frame_type = b"P"
+            curr_centroids = [_centroid(p) for p in curr_contours]
+            curr_masks64  = [_small_mask(p, 64) for p in curr_contours]
 
-        contours_d, _ = cv2.findContours(delta_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-        valid_contours_d = [c.squeeze().astype(np.float32) for c in contours_d if len(c) > 2]
-        areas_d = [cv2.contourArea(c) for c in contours_d if len(c) > 2]
-        idx_d = np.argsort(areas_d)[::-1]
-        sorted_boundaries_d = [valid_contours_d[i] for i in idx_d]
-        boundaries_d = sorted_boundaries_d
-        simplified_d = [b.astype(np.float32).squeeze() for b in boundaries_d]
-        simplified_d = [s for s in simplified_d if isinstance(s, np.ndarray) and len(s.shape)==2 and s.shape[0] >= 3]
+            for cid, prev_poly in list(prev_contours_by_id.items()):
+                pc = _centroid(prev_poly)
+                pm = _small_mask(prev_poly, 64)
 
-        # print number of delta contours (after XOR, findContours, filtering)
-        num_delta_contours = len(simplified_d)
-        print(f"[DELTA] contours={num_delta_contours}")
+                # nearest by centroid
+                best_j, best_d = None, 1e9
+                for j, cc in enumerate(curr_contours):
+                    if j in used_curr: continue
+                    d = np.linalg.norm(curr_centroids[j] - pc)
+                    if d < best_d:
+                        best_d, best_j = d, j
 
-        if simplified_d:
-            num_boundaries_d = len(simplified_d)
-            boundary_lengths_d = [len(b) for b in simplified_d]
-            all_points_d = np.vstack(simplified_d).astype(np.int16)
-            header_d = np.array([num_boundaries_d] + boundary_lengths_d, dtype=np.int32)
-            data_to_compress_d = header_d.tobytes() + all_points_d.tobytes()
-        else:
-            data_to_compress_d = np.array([], dtype=np.int16).tobytes()
-        compressed_delta = zstd.ZstdCompressor(level=3).compress(data_to_compress_d)
+                ok = False
+                if best_j is not None and best_d <= MATCH_MAX_DIST:
+                    iou = _iou(pm, curr_masks64[best_j])
+                    ok = (iou >= MATCH_MIN_IOU)
+
+                if ok:
+                    shift = _centroid(curr_contours[best_j]) - pc
+                    dx, dy = int(round(shift[0])), int(round(shift[1]))
+
+                    tx_prev = prev_poly.copy()
+                    if dx != 0 or dy != 0:
+                        tx_prev[:, 0] += dx
+                        tx_prev[:, 1] += dy
+
+                    iou2 = _iou(_small_mask(tx_prev, 64), curr_masks64[best_j])
+
+                    if iou2 >= REFRESH_MIN_IOU:
+                        if dx != 0 or dy != 0:
+                            ops.append(("D", cid, (dx, dy)))
+                        prev_contours_by_id[cid] = tx_prev
+                    else:
+                        ops.append(("N", cid, curr_contours[best_j]))
+                        prev_contours_by_id[cid] = curr_contours[best_j].copy()
+
+                    used_curr.add(best_j)
+                else:
+                    # no good match -> delete old
+                    ops.append(("X", cid, None))
+                    prev_contours_by_id.pop(cid, None)
+
+
+            # any unmatched current contours are NEW
+            for j, poly in enumerate(curr_contours):
+                if j in used_curr: continue
+                cid = NEXT_ID; NEXT_ID += 1
+                prev_contours_by_id[cid] = poly.copy()
+                ops.append(("N", cid, poly))
+
+        # --- Pack ops and compress (Zstd) ---
+        buf = bytearray()
+        buf.extend(frame_type)                      # 1B
+        buf.extend(struct.pack(">H", len(ops)))     # u16 count
+
+        for tag, cid, payload in ops:
+            buf.extend(tag.encode("ascii"))         # 'N'/'D'/'X'
+            buf.extend(struct.pack(">H", cid))      # u16 id
+            if tag == "N":
+                pts = payload.astype(np.int16)
+                buf.extend(struct.pack(">H", pts.shape[0]))  # u16 length
+                buf.extend(pts.tobytes())                    # int16 x,y pairs
+            elif tag == "D":
+                dx, dy = payload
+                buf.extend(b"T")                              # model: Translation
+                buf.extend(struct.pack(">hh", dx, dy))        # int16 dx,dy
+            elif tag == "X":
+                pass
+
+        compressed_delta = zstd.ZstdCompressor(level=3).compress(bytes(buf))
+
 
         # On-wire size includes 4B length header
         payload_len = len(compressed_delta)
         wire_len = 4 + payload_len
         sock.sendall(struct.pack(">I", payload_len) + compressed_delta)
 
-        # Print DELTA consistently vs the same baseline (512x512x3)
+        # breakdown counts for delta ops
+        nN = sum(1 for t, _, _ in ops if t == "N")
+        nD = sum(1 for t, _, _ in ops if t == "D")
+        nX = sum(1 for t, _, _ in ops if t == "X")
+
+        # single-line summary (FULL + DELTA)
         print(
-            f"[DELTA] wire={wire_len} B ({_fmt_kb(wire_len)}) "
-            f"| payload={payload_len} B ({_fmt_kb(payload_len)}) "
-            f"vs raw_512x512x3={RAW_BASELINE_KB:.2f} KB "
-            f"→ { _pct(wire_len, RAW_BASELINE_BGR) } of raw"
+            f"[FULL] {_fmt_kb(full_bytes)} ({_pct(full_bytes, RAW_BASELINE_BGR)} of raw) "
+            f"contours={num_full_contours} "
+            f"[DELTA] {_fmt_kb(payload_len)} ({_pct(payload_len, RAW_BASELINE_BGR)} of raw) "
+            f"raw={RAW_BASELINE_KB:.2f} KB"
         )
 
-        # Also show how much we saved vs sending FULL for this frame
-        if full_bytes > 0:
-            savings_bytes = full_bytes - payload_len
-            savings_pct = 100.0 * (1.0 - (payload_len / full_bytes))
-            print(
-                f"[DELTA vs FULL] full_payload={_fmt_kb(full_bytes)} "
-                f"→ delta_payload={_fmt_kb(payload_len)} "
-                f"(saves {savings_bytes/1024.0:.2f} KB, {savings_pct:.1f}%)"
-            )
+        # second line: delta breakdown
+        print(f"[DELTA breakdown] N={nN} D={nD} X={nX} ops={len(ops)}")
 
 
-        # DECODE DELTA
-        reconstructed_delta, delta_canvas = decode_frame_delta(
-            prev_edges, compressed_delta, image_shape=(512, 512)
-        )
+        # Build a local preview (what receiver will see) by drawing current ID map
+        preview = np.zeros((H, W), dtype=np.uint8)
+        for poly in prev_contours_by_id.values():
+            cv2.polylines(preview, [poly.astype(np.int32).reshape(-1,1,2)], True, 255, 1)
+        prev_edges = preview  # keep for your own on-screen continuity
 
-        prev_edges = reconstructed_delta.copy()
-
-        cycle_time = time.time() - start_cycle
-        # print(f"Dual encode-decode (full + delta): {cycle_time:.4f} seconds")
-
-        # GUI
-        cv2.imshow("Original Frame", frame)
-        cv2.imshow("Delta mask (XOR to send)", delta_mask)
+        cv2.imshow("Object-Delta preview (sender)", preview)
 
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
