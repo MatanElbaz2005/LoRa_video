@@ -129,7 +129,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
         data_to_compress = header.tobytes() + all_points.tobytes()
     else:
         data_to_compress = np.array([], dtype=np.int16).tobytes()
-    compressed = zstd.ZstdCompressor(level=3).compress(data_to_compress)
+    compressed = zstd.ZstdCompressor(level=22).compress(data_to_compress)
     times['compression'] = time.time() - start
 
     # Print timing breakdown
@@ -235,7 +235,7 @@ if __name__ == "__main__":
             elif mode == b"8": cnt_8 += 1
             elif mode == b"6": cnt_6 += 1
 
-        comp = zstd.ZstdCompressor(level=3).compress(bytes(buf))
+        comp = zstd.ZstdCompressor(level=22).compress(bytes(buf))
         return comp, (cnt_A, cnt_8, cnt_6)
 
         
@@ -425,7 +425,7 @@ if __name__ == "__main__":
             elif tag == "X":
                 pass
 
-        compressed_delta = zstd.ZstdCompressor(level=3).compress(bytes(buf))
+        compressed_delta = zstd.ZstdCompressor(level=22).compress(bytes(buf))
 
 
         # On-wire size includes 4B length header
