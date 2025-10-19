@@ -214,6 +214,66 @@ if __name__ == "__main__":
     def _pct(n_bytes: int, denom_bytes: int) -> str:
         return f"{(n_bytes / denom_bytes) * 100.0:.2f}%"
     
+    def pack_full_relative(contours):
+        """
+        Pack a list of contours using the same per-contour mode as 'N':
+        for each contour: [u16 L][1B mode][payload].
+        Return compressed bytes and per-mode counts for debug.
+        """
+        buf = bytearray()
+        cnt_A = cnt_8 = cnt_6 = 0
+
+        for pts in contours:
+            pts = pts.astype(np.int16)
+            L = pts.shape[0]
+            buf.extend(struct.pack(">H", L))
+            mode, encoded = encode_contour_relative(pts)
+            buf.extend(mode)
+            buf.extend(encoded)
+
+            if mode == b"A": cnt_A += 1
+            elif mode == b"8": cnt_8 += 1
+            elif mode == b"6": cnt_6 += 1
+
+        comp = zstd.ZstdCompressor(level=3).compress(bytes(buf))
+        return comp, (cnt_A, cnt_8, cnt_6)
+
+        
+    def encode_contour_relative(pts_i16: np.ndarray):
+        """
+        Decide the best encoding for a 'NEW' contour:
+        - '8': first point int16 (x0,y0), then (dx,dy) as int8 for the rest
+        - '6': first point int16 (x0,y0), then (dx,dy) as int16 for the rest
+        - 'A': absolute int16 pairs (legacy)
+        Returns: (mode_byte: bytes, payload: bytes)
+        """
+        assert pts_i16.ndim == 2 and pts_i16.shape[1] == 2 and pts_i16.dtype == np.int16
+        L = pts_i16.shape[0]
+        if L < 1:
+            return b"A", b""  # shouldn't happen with valid contours
+
+        # First point absolute (int16)
+        head = pts_i16[0:1].astype(np.int16)
+
+        if L == 1:
+            return b"A", head.tobytes()
+
+        # Compute deltas vs previous point
+        prev = pts_i16[:-1].astype(np.int32)
+        curr = pts_i16[1:].astype(np.int32)
+        deltas = (curr - prev)  # int32 range
+
+        max_abs = np.max(np.abs(deltas))
+        if max_abs <= 127:
+            # '8' mode: int8 deltas
+            return b"8", head.tobytes() + deltas.astype(np.int8).tobytes()
+        elif max_abs <= 32767:
+            # '6' mode: int16 deltas
+            return b"6", head.tobytes() + deltas.astype(np.int16).tobytes()
+        else:
+            # Fallback: absolute
+            return b"A", pts_i16.tobytes()
+    
     frame_id = 0
     prev_edges = None
     while True:
@@ -230,11 +290,16 @@ if __name__ == "__main__":
         curr_contours = simplified
 
         # FULL (hypothetical) payload size vs fixed baseline
-        full_bytes = len(compressed_full)
-        num_full_contours = len(simplified)
+        full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
+        full_bytes = len(full_rel_comp) # use relative-packed size
+        num_full_contours = len(curr_contours)
         # Build object-delta ops (N/D/X)
         ops = []          # (tag, id, payload)
         used_curr = set() # indices of curr_contours that were matched
+
+        n_mode_A = 0
+        n_mode_8 = 0
+        n_mode_6 = 0
 
         count_V = 0
         count_N_delta = 0
@@ -331,8 +396,21 @@ if __name__ == "__main__":
             buf.extend(struct.pack(">H", cid))      # u16 id
             if tag == "N":
                 pts = payload.astype(np.int16)
-                buf.extend(struct.pack(">H", pts.shape[0]))  # u16 length
-                buf.extend(pts.tobytes())                    # int16 x,y pairs
+                L = pts.shape[0]
+                buf.extend(struct.pack(">H", L))    # u16 length
+
+                # NEW: pick mode and count it
+                mode, encoded = encode_contour_relative(pts)
+                if mode == b"A":
+                    n_mode_A += 1
+                elif mode == b"8":
+                    n_mode_8 += 1
+                elif mode == b"6":
+                    n_mode_6 += 1
+
+                buf.extend(mode)                    # 1B: b'8'/b'6'/b'A'
+                buf.extend(encoded)                 # payload per mode
+
             elif tag == "D":
                 model, pdata = payload
                 if model == "T":
@@ -371,6 +449,8 @@ if __name__ == "__main__":
         # second line: delta breakdown
         print(f"[DELTA breakdown] N={nN} D={nD} X={nX} ops={len(ops)}")
         print(f"[DELTA breakdown] N(Δ>20)={count_N_delta} N(IoU)={count_N_iou} D(V)={count_V} total_ops={len(ops)}")
+        print(f"[N modes] A={n_mode_A} 8={n_mode_8} 6={n_mode_6}")
+        print(f"[FULL modes] A={full_A} 8={full_8} 6={full_6}")
 
 
         # Build a local preview (what receiver will see) by drawing current ID map

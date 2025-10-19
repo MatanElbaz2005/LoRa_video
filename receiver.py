@@ -151,11 +151,55 @@ if __name__ == "__main__":
 
             if tag == b"N":
                 (L,) = struct.unpack_from(">H", decompressed, p); p += 2
-                pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p)
-                p += 2*L*2
-                pts = pts.reshape(-1,2).astype(np.int16)
+                mode = decompressed[p:p+1]; p += 1  # b'8' / b'6' / b'A'
+
+                if L == 0:
+                    contours_by_id[cid] = np.empty((0,2), dtype=np.int16)
+                elif mode == b"A":
+                    # Absolute int16 pairs (legacy)
+                    pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p)
+                    p += 2*L*2
+                    pts = pts.reshape(-1,2).astype(np.int16)
+
+                elif mode == b"8":
+                    # First point absolute int16
+                    head = np.frombuffer(decompressed, dtype=np.int16, count=2, offset=p).reshape(1,2)
+                    p += 4
+                    if L == 1:
+                        pts = head.astype(np.int16)
+                    else:
+                        # (L-1) deltas as int8
+                        deltas = np.frombuffer(decompressed, dtype=np.int8, count=2*(L-1), offset=p).reshape(L-1, 2).astype(np.int16)
+                        p += (L-1)*2
+                        pts = np.empty((L,2), dtype=np.int16)
+                        pts[0] = head[0]
+                        # cumulative sum of deltas
+                        pts[1:] = (head[0].astype(np.int32) + np.cumsum(deltas.astype(np.int32), axis=0)).astype(np.int16)
+
+                elif mode == b"6":
+                    # First point absolute int16
+                    head = np.frombuffer(decompressed, dtype=np.int16, count=2, offset=p).reshape(1,2)
+                    p += 4
+                    if L == 1:
+                        pts = head.astype(np.int16)
+                    else:
+                        # (L-1) deltas as int16
+                        deltas = np.frombuffer(decompressed, dtype=np.int16, count=2*(L-1), offset=p).reshape(L-1, 2)
+                        p += (L-1)*2*2
+                        pts = np.empty((L,2), dtype=np.int16)
+                        pts[0] = head[0]
+                        pts[1:] = (head[0].astype(np.int32) + np.cumsum(deltas.astype(np.int32), axis=0)).astype(np.int16)
+
+                else:
+                    # Unknown mode: skip safely as absolute fallback
+                    pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p)
+                    p += 2*L*2
+                    pts = pts.reshape(-1,2).astype(np.int16)
+
+                # clamp & store
                 pts = np.clip(pts, [0,0], [511,511]).astype(np.int16)
                 contours_by_id[cid] = np.ascontiguousarray(pts)
+
 
             elif tag == b"D":
                 model = decompressed[p:p+1]; p += 1
