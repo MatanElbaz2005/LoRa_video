@@ -160,6 +160,7 @@ if __name__ == "__main__":
 
     # Object-Delta state & matching params
     NEXT_ID = 1                      # counter for new contour IDs
+    free_ids = set()                 # recycled IDs released from deleted contours
     prev_contours_by_id = {}         # id -> np.ndarray of points
     MATCH_MAX_DIST = 12.0            # max centroid distance (pixels)
     MATCH_MIN_IOU  = 0.15            # min IoU (tiny raster) to accept a match
@@ -167,6 +168,28 @@ if __name__ == "__main__":
     MAX_POINT_DELTA = 20             # if max(|Δx|,|Δy|) > this -> fallback to N
 
     # --- helpers for matching ---
+    def get_new_id():
+        global NEXT_ID
+        if free_ids:
+            return free_ids.pop()
+
+        start = NEXT_ID
+        while True:
+            cid = NEXT_ID & 0xFFFF
+            NEXT_ID = (NEXT_ID + 1) & 0xFFFF
+            if cid not in prev_contours_by_id:
+                return cid
+            if NEXT_ID == start:
+                raise RuntimeError("ID space exhausted: no free 16-bit IDs available")
+
+    def release_id(cid: int):
+        """Release an ID back into the free pool when contour disappears."""
+        cid &= 0xFFFF
+        if cid in prev_contours_by_id:
+            return
+        free_ids.add(cid)
+
+
     def _centroid(poly: np.ndarray) -> np.ndarray:
         return np.mean(poly, axis=0) if poly.size else np.array([0.0, 0.0], dtype=np.float32)
 
@@ -220,7 +243,7 @@ if __name__ == "__main__":
         if not prev_contours_by_id:
             # I-frame: send all as NEW
             for poly in curr_contours:
-                cid = NEXT_ID; NEXT_ID += 1
+                cid = get_new_id()
                 prev_contours_by_id[cid] = poly.copy()
                 ops.append(("N", cid, poly))
             frame_type = b"I"
@@ -287,12 +310,14 @@ if __name__ == "__main__":
                 else:
                     ops.append(("X", cid, None))
                     prev_contours_by_id.pop(cid, None)
+                    release_id(cid)
 
 
             # any unmatched current contours are NEW
             for j, poly in enumerate(curr_contours):
-                if j in used_curr: continue
-                cid = NEXT_ID; NEXT_ID += 1
+                if j in used_curr: 
+                    continue
+                cid = get_new_id()
                 prev_contours_by_id[cid] = poly.copy()
                 ops.append(("N", cid, poly))
 
@@ -354,7 +379,13 @@ if __name__ == "__main__":
             cv2.polylines(preview, [poly.astype(np.int32).reshape(-1,1,2)], True, 255, 1)
         prev_edges = preview  # keep for your own on-screen continuity
 
+        # Draw full reconstruction (no deltas) for comparison
+        full_preview = np.zeros((H, W), dtype=np.uint8)
+        for poly in curr_contours:
+            cv2.polylines(full_preview, [poly.astype(np.int32).reshape(-1,1,2)], True, 255, 1)
+
         cv2.imshow("Object-Delta preview (sender)", preview)
+        cv2.imshow("Full contours (no delta)", full_preview)
 
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
