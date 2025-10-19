@@ -6,6 +6,9 @@ import socket
 import struct
 from decode_frame import decode_frame, decode_frame_delta
 
+# Mode switch
+FULL_MODE = True
+
 def simplify_boundary(boundary, epsilon=2.0):
     """
     Simplify a boundary using OpenCV's implementation of Ramer-Douglas-Peucker (RDP) algorithm.
@@ -291,19 +294,36 @@ if __name__ == "__main__":
 
         # FULL (hypothetical) payload size vs fixed baseline
         full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
-        full_bytes = len(full_rel_comp) # use relative-packed size
+        full_bytes = len(full_rel_comp)  # size if we send full frame
         num_full_contours = len(curr_contours)
-        # Build object-delta ops (N/D/X)
-        ops = []          # (tag, id, payload)
-        used_curr = set() # indices of curr_contours that were matched
 
+        if FULL_MODE:
+            payload_bytes = full_rel_comp
+            sock.sendall(struct.pack(">I", len(payload_bytes)) + payload_bytes)
+
+            print(
+                f"[FULL] {_fmt_kb(full_bytes)} ({_pct(full_bytes, RAW_BASELINE_BGR)} of raw) "
+                f"contours={num_full_contours} (modes: A={full_A}, 8={full_8}, 6={full_6})"
+            )
+
+            full_preview = np.zeros((H, W), dtype=np.uint8)
+            for poly in curr_contours:
+                cv2.polylines(full_preview, [poly.astype(np.int32).reshape(-1,1,2)], True, 255, 1)
+
+            cv2.imshow("Full contours (no delta)", full_preview)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            frame_id += 1
+            continue
+
+        ops = []
+        used_curr = set()
         n_mode_A = 0
         n_mode_8 = 0
         n_mode_6 = 0
-
         count_V = 0
         count_N_delta = 0
-        count_N_iou = 0 
+        count_N_iou = 0
         
         if not prev_contours_by_id:
             # I-frame: send all as NEW

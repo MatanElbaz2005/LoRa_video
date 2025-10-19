@@ -7,6 +7,9 @@ import zstandard as zstd
 import socket
 import struct
 
+# Mode switch
+FULL_MODE = True
+
 def recv_exact(sock, n):
     data = b""
     while len(data) < n:
@@ -111,6 +114,75 @@ def decode_frame_delta(prev_canvas: np.ndarray, compressed_delta: bytes, image_s
 
     return updated, delta_canvas
 
+def decode_full_relative_payload(decompressed: bytes) -> list[np.ndarray]:
+    """
+    Decode a 'FULL' payload that contains only contours packed as:
+      repeat:
+        [u16 L][1B mode ('A'/'8'/'6')][payload per mode]
+    Returns: list of int16 (L,2) arrays
+    """
+    p = 0
+    contours = []
+    n = len(decompressed)
+    while p < n:
+        if p + 2 > n: break
+        (L,) = struct.unpack_from(">H", decompressed, p); p += 2
+        if L == 0:
+            contours.append(np.empty((0,2), dtype=np.int16))
+            continue
+        if p + 1 > n: break
+        mode = decompressed[p:p+1]; p += 1  # b'A' / b'8' / b'6'
+
+        if mode == b"A":
+            need = 2*L*2
+            if p + need > n: break
+            pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p).reshape(L,2)
+            p += need
+
+        elif mode == b"8":
+            # head (int16*2)
+            if p + 4 > n: break
+            head = np.frombuffer(decompressed, dtype=np.int16, count=2, offset=p).reshape(1,2)
+            p += 4
+            if L == 1:
+                pts = head.astype(np.int16)
+            else:
+                need = (L-1)*2  # int8 pairs → 2 bytes per point
+                if p + need > n: break
+                deltas = np.frombuffer(decompressed, dtype=np.int8, count=2*(L-1), offset=p).reshape(L-1,2).astype(np.int16)
+                p += need
+                pts = np.empty((L,2), dtype=np.int16)
+                pts[0] = head[0]
+                pts[1:] = (head[0].astype(np.int32) + np.cumsum(deltas.astype(np.int32), axis=0)).astype(np.int16)
+
+        elif mode == b"6":
+            # head (int16*2)
+            if p + 4 > n: break
+            head = np.frombuffer(decompressed, dtype=np.int16, count=2, offset=p).reshape(1,2)
+            p += 4
+            if L == 1:
+                pts = head.astype(np.int16)
+            else:
+                need = (L-1)*2*2  # int16 pairs → 4 bytes per point
+                if p + need > n: break
+                deltas = np.frombuffer(decompressed, dtype=np.int16, count=2*(L-1), offset=p).reshape(L-1,2)
+                p += need
+                pts = np.empty((L,2), dtype=np.int16)
+                pts[0] = head[0]
+                pts[1:] = (head[0].astype(np.int32) + np.cumsum(deltas.astype(np.int32), axis=0)).astype(np.int16)
+
+        else:
+            # fallback: treat as absolute
+            need = 2*L*2
+            if p + need > n: break
+            pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p).reshape(L,2)
+            p += need
+
+        pts = np.clip(pts, [0,0], [511,511]).astype(np.int16)
+        contours.append(np.ascontiguousarray(pts))
+
+    return contours
+
 # --- Receiver main loop ---
 if __name__ == "__main__":
     HOST = "127.0.0.1"
@@ -133,15 +205,29 @@ if __name__ == "__main__":
         payload = recv_exact(conn, msg_len)
         if not payload: break
 
-        # decompress the object-delta payload
+        # decompress payload
         decompressed = zstd.ZstdDecompressor().decompress(payload)
 
-        # parse: [1B FrameType][u16 Count][ops...]
+        if FULL_MODE:
+            contours = decode_full_relative_payload(decompressed)
+
+            canvas = np.zeros((512, 512), dtype=np.uint8)
+            for pts in contours:
+                if isinstance(pts, np.ndarray) and pts.ndim == 2 and pts.shape[0] >= 3 and pts.shape[1] == 2:
+                    try:
+                        cv2.polylines(canvas, [np.ascontiguousarray(pts.astype(np.int32)).reshape(-1,1,2)], True, 255, 1)
+                    except Exception as e:
+                        print(f"[DRAW FAIL] full pts shape={pts.shape} err={e}")
+            cv2.imshow("Reconstructed (FULL)", canvas)
+
+            if cv2.waitKey(1) & 0xFF == 27:
+                break
+            continue
+
         p = 0
         frame_type = decompressed[p:p+1]; p += 1
         (count,) = struct.unpack_from(">H", decompressed, p); p += 2
 
-        # persistent map of id -> contour
         if 'contours_by_id' not in locals():
             contours_by_id = {}
 
