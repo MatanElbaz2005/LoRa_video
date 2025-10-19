@@ -163,7 +163,8 @@ if __name__ == "__main__":
     prev_contours_by_id = {}         # id -> np.ndarray of points
     MATCH_MAX_DIST = 12.0            # max centroid distance (pixels)
     MATCH_MIN_IOU  = 0.15            # min IoU (tiny raster) to accept a match
-    REFRESH_MIN_IOU = 0.60
+    REFRESH_MIN_IOU = 0.60           # threshold below which we resend full contour (N)
+    MAX_POINT_DELTA = 20             # if max(|Δx|,|Δy|) > this -> fallback to N
 
     # --- helpers for matching ---
     def _centroid(poly: np.ndarray) -> np.ndarray:
@@ -212,6 +213,10 @@ if __name__ == "__main__":
         ops = []          # (tag, id, payload)
         used_curr = set() # indices of curr_contours that were matched
 
+        count_V = 0
+        count_N_delta = 0
+        count_N_iou = 0 
+        
         if not prev_contours_by_id:
             # I-frame: send all as NEW
             for poly in curr_contours:
@@ -254,16 +259,32 @@ if __name__ == "__main__":
                     iou2 = _iou(_small_mask(tx_prev, 64), curr_masks64[best_j])
 
                     if iou2 >= REFRESH_MIN_IOU:
-                        if dx != 0 or dy != 0:
-                            ops.append(("D", cid, (dx, dy)))
-                        prev_contours_by_id[cid] = tx_prev
+                        prev_pts = tx_prev.astype(np.int16)
+                        curr_pts = curr_contours[best_j].astype(np.int16)
+
+                        if prev_pts.shape[0] != curr_pts.shape[0]:
+                            L = min(prev_pts.shape[0], curr_pts.shape[0])
+                            prev_pts = prev_pts[:L]
+                            curr_pts = curr_pts[:L]
+
+                        deltas = curr_pts - prev_pts
+                        max_delta = np.max(np.abs(deltas))
+
+                        if max_delta <= MAX_POINT_DELTA:
+                            ops.append(("D", cid, ("V", deltas.astype(np.int8))))
+                            prev_contours_by_id[cid] = curr_pts.copy()
+                            count_V += 1
+                        else:
+                            ops.append(("N", cid, curr_contours[best_j]))
+                            prev_contours_by_id[cid] = curr_contours[best_j].copy()
+                            count_N_delta += 1
                     else:
                         ops.append(("N", cid, curr_contours[best_j]))
                         prev_contours_by_id[cid] = curr_contours[best_j].copy()
+                        count_N_iou += 1
 
                     used_curr.add(best_j)
                 else:
-                    # no good match -> delete old
                     ops.append(("X", cid, None))
                     prev_contours_by_id.pop(cid, None)
 
@@ -288,9 +309,16 @@ if __name__ == "__main__":
                 buf.extend(struct.pack(">H", pts.shape[0]))  # u16 length
                 buf.extend(pts.tobytes())                    # int16 x,y pairs
             elif tag == "D":
-                dx, dy = payload
-                buf.extend(b"T")                              # model: Translation
-                buf.extend(struct.pack(">hh", dx, dy))        # int16 dx,dy
+                model, pdata = payload
+                if model == "T":
+                    buf.extend(b"T")
+                    dx, dy = pdata
+                    buf.extend(struct.pack(">hh", dx, dy))
+                elif model == "V":
+                    buf.extend(b"V")
+                    L = pdata.shape[0]
+                    buf.extend(struct.pack(">H", L))  # length
+                    buf.extend(pdata.tobytes())       # Δx,Δy as int8
             elif tag == "X":
                 pass
 
@@ -317,6 +345,7 @@ if __name__ == "__main__":
 
         # second line: delta breakdown
         print(f"[DELTA breakdown] N={nN} D={nD} X={nX} ops={len(ops)}")
+        print(f"[DELTA breakdown] N(Δ>20)={count_N_delta} N(IoU)={count_N_iou} D(V)={count_V} total_ops={len(ops)}")
 
 
         # Build a local preview (what receiver will see) by drawing current ID map

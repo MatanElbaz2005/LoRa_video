@@ -142,7 +142,7 @@ if __name__ == "__main__":
         (count,) = struct.unpack_from(">H", decompressed, p); p += 2
 
         # persistent map of id -> contour
-        if 'contours_by_id' not in globals():
+        if 'contours_by_id' not in locals():
             contours_by_id = {}
 
         for _ in range(count):
@@ -153,17 +153,31 @@ if __name__ == "__main__":
                 (L,) = struct.unpack_from(">H", decompressed, p); p += 2
                 pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p)
                 p += 2*L*2
-                pts = pts.reshape(-1,2).astype(np.int32)
-                contours_by_id[cid] = pts
+                pts = pts.reshape(-1,2).astype(np.int16)
+                pts = np.clip(pts, [0,0], [511,511]).astype(np.int16)
+                contours_by_id[cid] = np.ascontiguousarray(pts)
 
             elif tag == b"D":
                 model = decompressed[p:p+1]; p += 1
                 if model == b"T":
                     dx, dy = struct.unpack_from(">hh", decompressed, p); p += 4
                     if cid in contours_by_id:
-                        c = contours_by_id[cid].copy()
-                        c[:,0] += dx; c[:,1] += dy
-                        contours_by_id[cid] = c
+                        poly = contours_by_id[cid].astype(np.int32)
+                        poly[:, 0] += dx; poly[:, 1] += dy
+                        poly = np.clip(poly, [0,0], [511,511]).astype(np.int16)
+                        contours_by_id[cid] = np.ascontiguousarray(poly)
+
+                elif model == b"V":
+                    (L,) = struct.unpack_from(">H", decompressed, p); p += 2
+                    deltas = np.frombuffer(decompressed, dtype=np.int8, count=L*2, offset=p).reshape(L, 2)
+                    p += L * 2
+                    if cid in contours_by_id:
+                        poly = contours_by_id[cid]
+                        if poly.shape[0] != L:
+                            poly = poly[:L]
+                        poly = poly.astype(np.int16) + deltas.astype(np.int16)
+                        poly = np.clip(poly, [0,0], [511,511]).astype(np.int16)
+                        contours_by_id[cid] = np.ascontiguousarray(poly)
                 else:
                     # reserved for future affine model
                     pass
@@ -172,10 +186,29 @@ if __name__ == "__main__":
                 if cid in contours_by_id:
                     contours_by_id.pop(cid)
 
+            if p > len(decompressed):
+                print(f"[WARN] Packet overrun at cid={cid}, skipping remaining ops.")
+                break
+
+        print(f"[Frame] count={count} total contours={len(contours_by_id)}")
+
         # draw current frame from the map
         canvas = np.zeros((512, 512), dtype=np.uint8)
-        for pts in contours_by_id.values():
-            cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
+        for cid, pts in contours_by_id.items():
+            if not isinstance(pts, np.ndarray):
+                print(f"[WARN] cid={cid} not ndarray -> {type(pts)}")
+                continue
+            if pts.ndim != 2 or pts.shape[1] != 2 or pts.shape[0] < 3:
+                print(f"[WARN] cid={cid} invalid shape={pts.shape}")
+                continue
+            if pts.size % 2 != 0:
+                print(f"[WARN] cid={cid} odd number of coordinates ({pts.size})")
+                continue
+            try:
+                pts32 = np.ascontiguousarray(pts.astype(np.int32))
+                cv2.polylines(canvas, [pts32.reshape(-1,1,2)], True, 255, 1)
+            except Exception as e:
+                print(f"[DRAW FAIL] cid={cid} dtype={pts.dtype} shape={pts.shape} err={e}")
 
         prev_canvas = canvas.copy()
         cv2.imshow("Reconstructed (Object-Delta)", canvas)
