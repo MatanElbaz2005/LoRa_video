@@ -220,20 +220,20 @@ if __name__ == "__main__":
     def _pct(n_bytes: int, denom_bytes: int) -> str:
         return f"{(n_bytes / denom_bytes) * 100.0:.2f}%"
     
-    def contour_efficiency_and_color(pts: np.ndarray, mode: bytes) -> tuple[float, tuple[int,int,int], str, int, float]:
+    def contour_metric(pts: np.ndarray, mode: bytes) -> tuple[float, int, float]:
         """
-        Return:
-        eff (float)           : bits-per-pixel-length (lower=better)
-        color (BGR tuple)     : visualization color
-        band (str)            : one of ["<0.5","0.5-1","1-2","2-4",">4"]
-        weight_bytes (int)    : encoded bytes used for this contour (header+payload)
-        geom_len_px (float)   : geometric length in pixels (perimeter-like)
+        Compute geometry-only efficiency metric and carry size stats.
+
+        Returns:
+            len_per_point (float): geometric length / number of points  [px/pt] (higher = more efficient)
+            weight_bytes (int)   : encoded bytes for this contour (header+payload) for summary panes
+            geom_len_px (float)  : geometric length (perimeter-like) in pixels
         """
         if pts.shape[0] < 2:
-            return 0.0, (255,255,255), "<0.5", 0, 0.0
+            return 0.0, 0, 0.0
 
-        # weight in bytes: header(3) + payload size (by mode)
         L = pts.shape[0]
+        # payload size by mode (for summary only)
         if mode == b"8":
             payload_bytes = 4 + (L-1)*2
         elif mode == b"6":
@@ -242,28 +242,15 @@ if __name__ == "__main__":
             payload_bytes = L * 4
         weight_bytes = 3 + payload_bytes
 
-        # geometric length in pixels (closed polyline)
+        # geometric length (close polyline)
         diff = np.diff(pts.astype(np.float32), axis=0)
         geom_len = float(np.sum(np.sqrt((diff**2).sum(axis=1))))
         if L >= 3:
             geom_len += float(np.linalg.norm(pts[-1] - pts[0]))
-        geom_len = max(geom_len, 1e-6)
 
-        eff = (weight_bytes * 8.0) / geom_len  # bits per pixel-length
-
-        # absolute thresholds (color-blind-friendly): white → blue → yellow → orange → red
-        if eff < 0.5:
-            color, band = (255,255,255), "<0.5"   # white
-        elif eff < 1.0:
-            color, band = (255,128,0),  "0.5-1"   # blue  (BGR)
-        elif eff < 2.0:
-            color, band = (0,255,255),  "1-2"     # yellow
-        elif eff < 4.0:
-            color, band = (0,165,255),  "2-4"     # orange
-        else:
-            color, band = (0,0,255),    ">4"      # bright red
-
-        return eff, color, band, int(weight_bytes), geom_len
+        L = max(L, 1)  # guard
+        len_per_point = geom_len / float(L)  # px per vertex (higher == better)
+        return len_per_point, int(weight_bytes), geom_len
 
     
     def pack_full_relative_raw(contours):
@@ -420,91 +407,112 @@ if __name__ == "__main__":
                 # visualize contour efficiency if enabled
                 if COLORED_CONTOURS and FULL_MODE and not FULL_BATCH_ENABLE and frame_id % 10 == 0:
                     eff_canvas = np.zeros((H, W, 3), dtype=np.uint8)
-                    all_eff = []
 
-                    # stats per band
-                    BANDS = ["<0.5","0.5-1","1-2","2-4",">4"]
-                    band_stats = {b: {"weight":0, "contours":0, "pixels":0.0} for b in BANDS}
+                    # palette (BGR): white, blue, yellow, orange, red
+                    PALETTE = [
+                        (255,255,255),  # Top 20% (most efficient)
+                        (255,  0,  0),  # 20–40%  (blue)
+                        (  0,255,255),  # 40–60%  (yellow)
+                        (  0,165,255),  # 60–80%  (orange)
+                        (  0,  0,255),  # Bottom 20% (least efficient)
+                    ]
+                    BAND_LABELS = ["Top 20%", "20-40%", "40-60%", "60-80%", "Bottom 20%"]
 
+                    # first pass: compute metric per contour
+                    metrics = []  # list of (len_per_point, weight_bytes, geom_len, poly)
                     for poly in curr_contours:
                         mode, _ = encode_contour_relative(poly.astype(np.int16))
-                        eff, color, band, weight_bytes, geom_len = contour_efficiency_and_color(poly, mode)
-                        all_eff.append(eff)
+                        m, w_bytes, g_len = contour_metric(poly, mode)
+                        metrics.append((m, w_bytes, g_len, poly))
 
+                    if metrics:
+                        vals = np.array([m for (m, _, _, _) in metrics], dtype=np.float32)
+                        q = np.quantile(vals, [0.2, 0.4, 0.6, 0.8])  # relative thresholds
+
+                    # stats per relative band (indices 0..4)
+                    band_stats = {i: {"weight":0, "contours":0, "pixels":0.0} for i in range(5)}
+
+                    # second pass: assign band per contour, draw, and accumulate stats
+                    for (m, w_bytes, g_len, poly) in metrics:
+                        # band index by quantiles (higher m == better)
+                        if   m >= q[3]: band_idx = 0        # top 20% (white)
+                        elif m >= q[2]: band_idx = 1        # 20–40% (blue)
+                        elif m >= q[1]: band_idx = 2        # 40–60% (yellow)
+                        elif m >= q[0]: band_idx = 3        # 60–80% (orange)
+                        else:           band_idx = 4        # bottom 20% (red)
+
+                        color = PALETTE[band_idx]
                         cv2.polylines(eff_canvas, [poly.astype(np.int32).reshape(-1,1,2)], True, color, 1)
 
-                        # accumulate true stats
-                        band_stats[band]["weight"]   += weight_bytes
-                        band_stats[band]["contours"] += 1
-                        band_stats[band]["pixels"]   += geom_len
+                        band_stats[band_idx]["weight"]   += w_bytes
+                        band_stats[band_idx]["contours"] += 1
+                        band_stats[band_idx]["pixels"]   += g_len
+
 
                     # draw color scale legend on the right
-                    legend_w = 90
+                    legend_w = 140
                     legend = np.zeros((H, legend_w, 3), dtype=np.uint8)
-                    legend_colors = [
-                        ((255,255,255), "<0.5"),
-                        ((255,128,0),   "0.5-1"),
-                        ((0,255,255),   "1-2"),
-                        ((0,165,255),   "2-4"),
-                        ((0,0,255),     ">4"),
-                    ]
-                    cv2.putText(legend, "b/px", (35,20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1, cv2.LINE_AA)
+                    cv2.putText(legend, "Relative bands", (10,20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
+
                     y0 = 50
-                    for i, (clr, label) in enumerate(legend_colors):
+                    for i, label in enumerate(BAND_LABELS):
                         y = y0 + i*40
-                        cv2.rectangle(legend, (10,y-10), (30,y+10), clr, -1)
-                        cv2.putText(legend, label, (40,y+5), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.rectangle(legend, (10,y-10), (30,y+10), PALETTE[i], -1)
+                        cv2.putText(legend, label, (40,y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1, cv2.LINE_AA)
 
                     combined = np.hstack((eff_canvas, legend))
-                    mean_eff = np.mean(all_eff) if all_eff else 0
-                    cv2.putText(combined, f"Mean efficiency: {mean_eff:.2f} bits/px", (10, H-10),
+
+                    # mean of the new metric: px per point
+                    if metrics:
+                        mean_len_per_point = float(np.mean([m for (m,_,_,_) in metrics]))
+                    else:
+                        mean_len_per_point = 0.0
+
+                    cv2.putText(combined, f"Mean length/point: {mean_len_per_point:.2f} px/pt", (10, H-10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
                     cv2.imshow("Contour efficiency (sender)", combined)
                     # Summary table (per frame)
-                    # totals
-                    total_weight   = sum(band_stats[b]["weight"]   for b in BANDS) or 1
-                    total_contours = sum(band_stats[b]["contours"] for b in BANDS) or 1
-                    total_pixels   = sum(band_stats[b]["pixels"]   for b in BANDS) or 1.0
+                    # totals (indices 0..4)
+                    total_weight   = sum(band_stats[i]["weight"]   for i in range(5)) or 1
+                    total_contours = sum(band_stats[i]["contours"] for i in range(5)) or 1
+                    total_pixels   = sum(band_stats[i]["pixels"]   for i in range(5)) or 1.0
 
-                    # canvas
-                    summary_w, summary_h = 720, 260
+                    summary_w, summary_h = 760, 260
                     summary_img = np.zeros((summary_h, summary_w, 3), dtype=np.uint8)
 
-                    # title
-                    cv2.putText(summary_img, "Contour Efficiency - Per-Band Summary", (18,30),
+                    cv2.putText(summary_img, "Contour Efficiency - Relative Bands Summary", (18,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2, cv2.LINE_AA)
 
-                    # headers
                     x0, y0 = 18, 60
-                    col_x = [18, 150, 290, 430, 560, 650]  # band, weightKB, count, pixels, %weight, %contours
-                    headers = ["Band (b/px)", "Weight (KB)", "#Contours", "Pixels", "%Weight", "%Contours"]
+                    col_x = [18, 170, 310, 450, 590, 690]  # Band, Weight (KB), #Contours, Pixels, %Weight, %Contours
+                    headers = ["Band (relative)", "Weight (KB)", "#Contours", "Pixels", "%Weight", "%Contours"]
                     for i, h in enumerate(headers):
                         cv2.putText(summary_img, h, (col_x[i], y0), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
 
-                    # rows
                     row_h = 30
-                    for r, (clr, band_label) in enumerate(legend_colors):
-                        b = band_label                 # key exactly as in BANDS
-                        y = y0 + 10 + (r+1)*row_h
+                    for idx in range(5):
+                        clr   = PALETTE[idx]
+                        label = BAND_LABELS[idx]
+                        y = y0 + 10 + (idx+1)*row_h
 
-                        w_bytes   = band_stats[b]["weight"]
-                        c_count   = band_stats[b]["contours"]
-                        p_pixels  = band_stats[b]["pixels"]
+                        w_bytes = band_stats[idx]["weight"]
+                        c_count = band_stats[idx]["contours"]
+                        p_pixels = band_stats[idx]["pixels"]
 
                         pct_w = 100.0 * (w_bytes / total_weight)
                         pct_c = 100.0 * (c_count  / total_contours)
 
-                        # color swatch + band label
+                        # swatch + label
                         cv2.rectangle(summary_img, (col_x[0], y-12), (col_x[0]+24, y+8), clr, -1)
-                        cv2.putText(summary_img, f"{b}", (col_x[0]+32, y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(summary_img, label, (col_x[0]+32, y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
 
                         # numbers
                         kb = w_bytes/1024.0
-                        cv2.putText(summary_img, f"{kb:6.2f}",   (col_x[1], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
-                        cv2.putText(summary_img, f"{c_count:6d}",(col_x[2], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
-                        cv2.putText(summary_img, f"{int(round(p_pixels)):6d}", (col_x[3], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
-                        cv2.putText(summary_img, f"{pct_w:5.1f}%", (col_x[4], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
-                        cv2.putText(summary_img, f"{pct_c:5.1f}%", (col_x[5], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(summary_img, f"{kb:6.2f}",               (col_x[1], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(summary_img, f"{c_count:6d}",            (col_x[2], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(summary_img, f"{int(round(p_pixels)):6d}",(col_x[3], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(summary_img, f"{pct_w:5.1f}%",           (col_x[4], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
+                        cv2.putText(summary_img, f"{pct_c:5.1f}%",           (col_x[5], y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
 
                     cv2.imshow("Contour efficiency summary", summary_img)
                     cv2.waitKey(1)
