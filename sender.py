@@ -43,8 +43,9 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     2. Apply median filter for noise reduction.
     3. Apply CLAHE for contrast enhancement.
     4. Detect edges using Laplacian (percentile), Canny (auto), and Scharr (percentile), then OR-combine.
-    5. Extract and sort connected components (CCs) by area using findContours.
-    6. Simplify boundaries of top percentile_pin% CCs.
+    5. Extract CCs with findContours, simplify all boundaries (RDP).
+    6. Rank all contours by relative efficiency (length/points), split into 5 quantile bands.
+       Select ~50% of contours by quotas: 20% (top), 20% (20–40), then 6%, 3%, 1% (40–60/60–80/80–100).
     7. Compress simplified points with Zstandard, including boundary lengths.
 
     Args:
@@ -108,21 +109,103 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     areas = [cv2.contourArea(c) for c in contours if len(c) > 2]
     num_ccs = len(valid_contours)
 
-    # Sort by area (descending)
-    sorted_idx = np.argsort(areas)[::-1]
-    sorted_boundaries = [valid_contours[i] for i in sorted_idx]
-    times['tracing_sorting'] = time.time() - start
-
-    # Pin to top percentile (e.g., 50%)
+    # Simplify ALL contours first (RDP)
     start = time.time()
-    max_trace = max(1, int(num_ccs * (percentile_pin / 100)))
-    boundaries = sorted_boundaries[:max_trace]
-
-    # Simplify boundaries
-    simplified = [simplify_boundary(b, epsilon=2.0) for b in boundaries]
-    # Filter out invalid simplified contours (e.g., < 3 points)
-    simplified = [s for s in simplified if len(s.shape) == 2 and s.shape[0] >= 3]
+    simplified_all = [simplify_boundary(b, epsilon=2.0) for b in valid_contours]
+    simplified_all = [s for s in simplified_all if len(s.shape) == 2 and s.shape[0] >= 3]
     times['simplification'] = time.time() - start
+
+    if not simplified_all:
+        simplified = []
+        bands_info = {
+            "all_simplified": [],
+            "band_idx": np.array([], dtype=np.int32),
+            "effvals": np.array([], dtype=np.float32),
+            "selected_idx": np.array([], dtype=np.int32),
+            "palette": [(255,255,255),(255,0,0),(0,255,255),(0,165,255),(0,0,255)],
+            "labels": ["Top 20%","20-40%","40-60%","60-80%","Bottom 20%"],
+        }
+    else:
+        start = time.time()
+        def _geom_len(poly: np.ndarray) -> float:
+            d = np.diff(poly.astype(np.float32), axis=0)
+            g = float(np.sum(np.sqrt((d**2).sum(axis=1))))
+            if poly.shape[0] >= 3:
+                g += float(np.linalg.norm(poly[-1] - poly[0]))
+            return g
+
+        lengths = np.array([_geom_len(p) for p in simplified_all], dtype=np.float32)
+        points  = np.array([max(1, p.shape[0]) for p in simplified_all], dtype=np.int32)
+        effvals = lengths / points
+        times['band_metric'] = time.time() - start
+
+        q20, q40, q60, q80 = np.quantile(effvals, [0.2, 0.4, 0.6, 0.8])
+
+        band_idx = np.empty(len(effvals), dtype=np.int32)
+        band_idx[effvals >= q80] = 0
+        band_idx[(effvals < q80) & (effvals >= q60)] = 1
+        band_idx[(effvals < q60) & (effvals >= q40)] = 2
+        band_idx[(effvals < q40) & (effvals >= q20)] = 3
+        band_idx[effvals < q20] = 4
+
+        start = time.time()
+        total_N  = len(simplified_all)
+        target_N = max(1, int(round(total_N * (percentile_pin / 100.0))))
+        base_q   = np.array([0.20, 0.20, 0.06, 0.03, 0.01], dtype=np.float32)
+        quotas   = np.floor(base_q * total_N + 1e-6).astype(int)
+
+        delta = target_N - int(quotas.sum())
+        if delta != 0:
+            order = [0,1,2,3,4] if delta > 0 else [4,3,2,1,0]
+            i = 0
+            while delta != 0:
+                quotas[order[i]] += 1 if delta > 0 else -1
+                delta += -1 if delta > 0 else 1
+                i = (i + 1) % 5
+
+        selected_idx = []
+        for b in range(5):
+            idxs = np.where(band_idx == b)[0]
+            if idxs.size == 0:
+                continue
+            areas_s = np.array([cv2.contourArea(simplified_all[i]) for i in idxs], dtype=np.float32)
+            order = idxs[np.argsort(-areas_s)]
+            k = max(0, min(quotas[b], order.size))
+            selected_idx.extend(order[:k].tolist())
+
+        if len(selected_idx) < target_N:
+            need = target_N - len(selected_idx)
+            taken = set(selected_idx)
+            for b in [0,1,2,3,4]:
+                idxs = [i for i in np.where(band_idx == b)[0] if i not in taken]
+                if not idxs:
+                    continue
+                areas_s = np.array([cv2.contourArea(simplified_all[i]) for i in idxs], dtype=np.float32)
+                order = np.array(idxs)[np.argsort(-areas_s)]
+                grab = order[:need].tolist()
+                selected_idx.extend(grab)
+                need -= len(grab)
+                if need <= 0:
+                    break
+
+        simplified = [simplified_all[i] for i in selected_idx]
+        times['band_select'] = time.time() - start
+
+        bands_info = {
+            "all_simplified": simplified_all,
+            "band_idx": band_idx,
+            "effvals": effvals,
+            "selected_idx": np.array(selected_idx, dtype=np.int32),
+            "palette": [
+                (255,255,255),  # white
+                (255,  0,  0),  # blue
+                (  0,255,255),  # yellow
+                (  0,165,255),  # orange
+                (  0,  0,255),  # red
+            ],
+            "labels": ["Top 20%","20-40%","40-60%","60-80%","Bottom 20%"],
+        }
+
 
     # Prepare data for compression: store number of boundaries and lengths
     start = time.time()
@@ -144,7 +227,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
         # print(f"  {step}: {t:.4f}")
         pass
     # print(f"Total time: {sum(times.values()):.4f}")
-    return compressed, img_binary, simplified, (512, 512)
+    return compressed, img_binary, simplified, (512, 512), bands_info
 
 
 # Example usage for live camera
@@ -219,39 +302,6 @@ if __name__ == "__main__":
 
     def _pct(n_bytes: int, denom_bytes: int) -> str:
         return f"{(n_bytes / denom_bytes) * 100.0:.2f}%"
-    
-    def contour_metric(pts: np.ndarray, mode: bytes) -> tuple[float, int, float]:
-        """
-        Compute geometry-only efficiency metric and carry size stats.
-
-        Returns:
-            len_per_point (float): geometric length / number of points  [px/pt] (higher = more efficient)
-            weight_bytes (int)   : encoded bytes for this contour (header+payload) for summary panes
-            geom_len_px (float)  : geometric length (perimeter-like) in pixels
-        """
-        if pts.shape[0] < 2:
-            return 0.0, 0, 0.0
-
-        L = pts.shape[0]
-        # payload size by mode (for summary only)
-        if mode == b"8":
-            payload_bytes = 4 + (L-1)*2
-        elif mode == b"6":
-            payload_bytes = 4 + (L-1)*4
-        else:
-            payload_bytes = L * 4
-        weight_bytes = 3 + payload_bytes
-
-        # geometric length (close polyline)
-        diff = np.diff(pts.astype(np.float32), axis=0)
-        geom_len = float(np.sum(np.sqrt((diff**2).sum(axis=1))))
-        if L >= 3:
-            geom_len += float(np.linalg.norm(pts[-1] - pts[0]))
-
-        L = max(L, 1)  # guard
-        len_per_point = geom_len / float(L)  # px per vertex (higher == better)
-        return len_per_point, int(weight_bytes), geom_len
-
     
     def pack_full_relative_raw(contours):
         """
@@ -344,7 +394,7 @@ if __name__ == "__main__":
         start_cycle = time.time()
 
         # FULL FRAME: encode + decode
-        compressed_full, img_binary, simplified, _ = encode_frame(
+        compressed_full, img_binary, simplified, _, bands_info = encode_frame(
             frame, percentile_pin=50, scharr_percentile=92
         )
         curr_contours = simplified
@@ -408,80 +458,53 @@ if __name__ == "__main__":
                 if COLORED_CONTOURS and FULL_MODE and not FULL_BATCH_ENABLE and frame_id % 10 == 0:
                     eff_canvas = np.zeros((H, W, 3), dtype=np.uint8)
 
-                    # palette (BGR): white, blue, yellow, orange, red
-                    PALETTE = [
-                        (255,255,255),  # Top 20% (most efficient)
-                        (255,  0,  0),  # 20–40%  (blue)
-                        (  0,255,255),  # 40–60%  (yellow)
-                        (  0,165,255),  # 60–80%  (orange)
-                        (  0,  0,255),  # Bottom 20% (least efficient)
-                    ]
-                    BAND_LABELS = ["Top 20%", "20-40%", "40-60%", "60-80%", "Bottom 20%"]
+                    ALL   = bands_info["all_simplified"]
+                    BIDX  = bands_info["band_idx"]
+                    PALET = bands_info["palette"]
+                    LABEL = bands_info["labels"]
 
-                    # first pass: compute metric per contour
-                    metrics = []  # list of (len_per_point, weight_bytes, geom_len, poly)
-                    for poly in curr_contours:
-                        mode, _ = encode_contour_relative(poly.astype(np.int16))
-                        m, w_bytes, g_len = contour_metric(poly, mode)
-                        metrics.append((m, w_bytes, g_len, poly))
+                    for i, poly in enumerate(ALL):
+                        c = PALET[BIDX[i]]
+                        cv2.polylines(eff_canvas, [poly.astype(np.int32).reshape(-1,1,2)], True, c, 1)
 
-                    if metrics:
-                        vals = np.array([m for (m, _, _, _) in metrics], dtype=np.float32)
-                        q = np.quantile(vals, [0.2, 0.4, 0.6, 0.8])  # relative thresholds
-
-                    # stats per relative band (indices 0..4)
-                    band_stats = {i: {"weight":0, "contours":0, "pixels":0.0} for i in range(5)}
-
-                    # second pass: assign band per contour, draw, and accumulate stats
-                    for (m, w_bytes, g_len, poly) in metrics:
-                        # band index by quantiles (higher m == better)
-                        if   m >= q[3]: band_idx = 0        # top 20% (white)
-                        elif m >= q[2]: band_idx = 1        # 20–40% (blue)
-                        elif m >= q[1]: band_idx = 2        # 40–60% (yellow)
-                        elif m >= q[0]: band_idx = 3        # 60–80% (orange)
-                        else:           band_idx = 4        # bottom 20% (red)
-
-                        color = PALETTE[band_idx]
-                        cv2.polylines(eff_canvas, [poly.astype(np.int32).reshape(-1,1,2)], True, color, 1)
-
-                        band_stats[band_idx]["weight"]   += w_bytes
-                        band_stats[band_idx]["contours"] += 1
-                        band_stats[band_idx]["pixels"]   += g_len
-
-
-                    # draw color scale legend on the right
                     legend_w = 140
                     legend = np.zeros((H, legend_w, 3), dtype=np.uint8)
                     cv2.putText(legend, "Relative bands", (10,20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200,200,200), 1, cv2.LINE_AA)
-
                     y0 = 50
-                    for i, label in enumerate(BAND_LABELS):
+                    for i, label in enumerate(LABEL):
                         y = y0 + i*40
-                        cv2.rectangle(legend, (10,y-10), (30,y+10), PALETTE[i], -1)
+                        cv2.rectangle(legend, (10,y-10), (30,y+10), PALET[i], -1)
                         cv2.putText(legend, label, (40,y+6), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255,255,255), 1, cv2.LINE_AA)
 
                     combined = np.hstack((eff_canvas, legend))
-
-                    # mean of the new metric: px per point
-                    if metrics:
-                        mean_len_per_point = float(np.mean([m for (m,_,_,_) in metrics]))
-                    else:
-                        mean_len_per_point = 0.0
-
-                    cv2.putText(combined, f"Mean length/point: {mean_len_per_point:.2f} px/pt", (10, H-10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
                     cv2.imshow("Contour efficiency (sender)", combined)
-                    # Summary table (per frame)
-                    # totals (indices 0..4)
-                    total_weight   = sum(band_stats[i]["weight"]   for i in range(5)) or 1
-                    total_contours = sum(band_stats[i]["contours"] for i in range(5)) or 1
-                    total_pixels   = sum(band_stats[i]["pixels"]   for i in range(5)) or 1.0
 
                     summary_w, summary_h = 760, 260
                     summary_img = np.zeros((summary_h, summary_w, 3), dtype=np.uint8)
-
-                    cv2.putText(summary_img, "Contour Efficiency - Relative Bands Summary", (18,30),
+                    cv2.putText(summary_img, "Contour Efficiency - Relative Bands Summary (ALL contours)", (18,30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2, cv2.LINE_AA)
+
+                    band_stats = {i: {"weight":0, "contours":0, "pixels":0.0} for i in range(5)}
+
+                    def _geom_len(poly: np.ndarray) -> float:
+                        d = np.diff(poly.astype(np.float32), axis=0)
+                        g = float(np.sum(np.sqrt((d**2).sum(axis=1))))
+                        if poly.shape[0] >= 3:
+                            g += float(np.linalg.norm(poly[-1] - poly[0]))
+                        return g
+
+                    for i, poly in enumerate(ALL):
+                        b = int(BIDX[i])
+                        L = poly.shape[0]
+                        payload_bytes = 4 + (max(1, L)-1)*2
+                        weight_bytes = 3 + payload_bytes
+                        band_stats[b]["weight"]   += weight_bytes
+                        band_stats[b]["contours"] += 1
+                        band_stats[b]["pixels"]   += _geom_len(poly)
+
+                    total_weight   = sum(band_stats[i]["weight"]   for i in range(5)) or 1
+                    total_contours = sum(band_stats[i]["contours"] for i in range(5)) or 1
+                    total_pixels   = sum(band_stats[i]["pixels"]   for i in range(5)) or 1.0
 
                     x0, y0 = 18, 60
                     col_x = [18, 170, 310, 450, 590, 690]  # Band, Weight (KB), #Contours, Pixels, %Weight, %Contours
@@ -491,8 +514,8 @@ if __name__ == "__main__":
 
                     row_h = 30
                     for idx in range(5):
-                        clr   = PALETTE[idx]
-                        label = BAND_LABELS[idx]
+                        clr   = PALET[idx]
+                        label = LABEL[idx]
                         y = y0 + 10 + (idx+1)*row_h
 
                         w_bytes = band_stats[idx]["weight"]
