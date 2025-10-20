@@ -8,6 +8,7 @@ from decode_frame import decode_frame, decode_frame_delta
 
 # Mode switch
 FULL_MODE = True
+FULL_BATCH_ENABLE = False
 FULL_BATCH_COUNT = 3  # number of full frames to group per message (>=1)
 
 def simplify_boundary(boundary, epsilon=2.0):
@@ -320,42 +321,57 @@ if __name__ == "__main__":
         num_full_contours = len(curr_contours)
 
         if FULL_MODE:
-            # build raw (uncompressed) payload for this frame
-            full_raw, (full_A, full_8, full_6) = pack_full_relative_raw(curr_contours)
-            _full_batch_raw.append(full_raw)
+            if FULL_BATCH_ENABLE:
+                # BATCH ON: accumulate RAW frames, compress together with Zstd
+                full_raw, (full_A, full_8, full_6) = pack_full_relative_raw(curr_contours)
+                _full_batch_raw.append(full_raw)
 
-            print(
-                f"[FULL] {_fmt_kb(len(full_raw))} ({_pct(len(full_raw), RAW_BASELINE_BGR)} of raw) "
-                f"contours={num_full_contours} (A={full_A}, 8={full_8}, 6={full_6}) "
-                f"raw={RAW_BASELINE_KB:.2f} KB "
-                f"batch={len(_full_batch_raw)}/{FULL_BATCH_COUNT}"
-            )
+                comp_single_for_stats = zstd.ZstdCompressor(level=22).compress(full_raw)
+                print(
+                    f"[FULL] {_fmt_kb(len(comp_single_for_stats))} "
+                    f"({_pct(len(comp_single_for_stats), RAW_BASELINE_BGR)} of raw) "
+                    f"contours={num_full_contours} "
+                    f"raw={RAW_BASELINE_KB:.2f} KB "
+                    f"batch={len(_full_batch_raw)}/{FULL_BATCH_COUNT}"
+                )
+                print(f"[FULL modes] A={full_A} 8={full_8} 6={full_6}")
 
-            if len(_full_batch_raw) >= max(1, int(FULL_BATCH_COUNT)):
-                agg = bytearray()
-                N = len(_full_batch_raw)
-                agg.extend(struct.pack(">H", N))
-                for fr in _full_batch_raw:
-                    agg.extend(struct.pack(">I", len(fr)))
-                    agg.extend(fr)
+                if len(_full_batch_raw) >= max(1, int(FULL_BATCH_COUNT)):
+                    agg = bytearray()
+                    N = len(_full_batch_raw)
+                    agg.extend(struct.pack(">H", N))
+                    for fr in _full_batch_raw:
+                        agg.extend(struct.pack(">I", len(fr)))
+                        agg.extend(fr)
 
-                comp = zstd.ZstdCompressor(level=22).compress(bytes(agg))
-                sock.sendall(struct.pack(">I", len(comp)) + comp)
+                    comp = zstd.ZstdCompressor(level=22).compress(bytes(agg))
+                    sock.sendall(struct.pack(">I", len(comp)) + comp)
+
+                    print(
+                        f"[SEND][FULL][BATCH] total={len(comp)} B ({_fmt_kb(len(comp))}) "
+                        f"(raw={_fmt_kb(len(agg))}) "
+                        f"N={N} frames"
+                    )
+                    _full_batch_raw.clear()
+
+                frame_id += 1
+                continue
+
+            else:
+                # BATCH OFF: classic single-frame FULL
+                full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
+                full_bytes = len(full_rel_comp)
+                sock.sendall(struct.pack(">I", full_bytes) + full_rel_comp)
 
                 print(
-                    f"[SEND][FULL][BATCH] total={len(comp)} B ({_fmt_kb(len(comp))}) "
-                    f"(raw={_fmt_kb(len(agg))}) "
-                    f"N={N} frames"
+                    f"[FULL] {_fmt_kb(full_bytes)} ({_pct(full_bytes, RAW_BASELINE_BGR)} of raw) "
+                    f"contours={num_full_contours} "
+                    f"raw={RAW_BASELINE_KB:.2f} KB"
                 )
+                print(f"[FULL modes] A={full_A} 8={full_8} 6={full_6}")
 
-                _full_batch_raw.clear()
-
-
-                _full_batch_raw.clear()
-
-            # preview window שלך (אם יש) נשאר כפי שהוא
-            frame_id += 1
-            continue
+                frame_id += 1
+                continue
 
 
         ops = []
@@ -531,8 +547,8 @@ if __name__ == "__main__":
 
         
         if cv2.waitKey(1) & 0xFF == ord('q'):
-            # flush remaining partial batch
-            if FULL_MODE and _full_batch_raw:
+            # flush remaining partial batch (only when batching is enabled)
+            if FULL_MODE and FULL_BATCH_ENABLE and _full_batch_raw:
                 agg = bytearray()
                 N = len(_full_batch_raw)
                 agg.extend(struct.pack(">H", N))

@@ -9,7 +9,8 @@ import struct
 
 # Mode switch
 FULL_MODE = True
-FULL_BATCH_COUNT = 3  # set to 1 to behave like single-frame
+FULL_BATCH_ENABLE = False
+FULL_BATCH_COUNT = 3
 
 def recv_exact(sock, n):
     data = b""
@@ -210,24 +211,42 @@ if __name__ == "__main__":
         decompressed = zstd.ZstdDecompressor().decompress(payload)
 
         if FULL_MODE:
-            # aggregate format: [u16 N][repeat N: u32 len | frame_raw]
-            p = 0
-            if p + 2 > len(decompressed):
-                # malformed
+            if FULL_BATCH_ENABLE:
+                # BATCH ON: payload is an aggregate of N frames
+                p = 0
+                if p + 2 > len(decompressed):
+                    continue
+                (N,) = struct.unpack_from(">H", decompressed, p); p += 2
+
+                last_canvas = None
+                for _ in range(N):
+                    if p + 4 > len(decompressed):
+                        break
+                    (L,) = struct.unpack_from(">I", decompressed, p); p += 4
+                    if p + L > len(decompressed):
+                        break
+                    frame_raw = decompressed[p:p+L]; p += L
+
+                    contours = decode_full_relative_payload(frame_raw)
+
+                    canvas = np.zeros((512, 512), dtype=np.uint8)
+                    for pts in contours:
+                        if isinstance(pts, np.ndarray) and pts.ndim == 2 and pts.shape[0] >= 3 and pts.shape[1] == 2:
+                            try:
+                                cv2.polylines(canvas, [np.ascontiguousarray(pts.astype(np.int32)).reshape(-1,1,2)], True, 255, 1)
+                            except Exception as e:
+                                print(f"[DRAW FAIL] full pts shape={pts.shape} err={e}")
+                    last_canvas = canvas
+
+                if last_canvas is not None:
+                    cv2.imshow("Reconstructed (FULL)", last_canvas)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
                 continue
-            (N,) = struct.unpack_from(">H", decompressed, p); p += 2
 
-            last_canvas = None
-            for _ in range(N):
-                if p + 4 > len(decompressed):
-                    break
-                (L,) = struct.unpack_from(">I", decompressed, p); p += 4
-                if p + L > len(decompressed):
-                    break
-                frame_raw = decompressed[p:p+L]; p += L
-
-                contours = decode_full_relative_payload(frame_raw)
-
+            else:
+                # BATCH OFF: single-frame FULL
+                contours = decode_full_relative_payload(decompressed)
                 canvas = np.zeros((512, 512), dtype=np.uint8)
                 for pts in contours:
                     if isinstance(pts, np.ndarray) and pts.ndim == 2 and pts.shape[0] >= 3 and pts.shape[1] == 2:
@@ -235,13 +254,10 @@ if __name__ == "__main__":
                             cv2.polylines(canvas, [np.ascontiguousarray(pts.astype(np.int32)).reshape(-1,1,2)], True, 255, 1)
                         except Exception as e:
                             print(f"[DRAW FAIL] full pts shape={pts.shape} err={e}")
-                last_canvas = canvas
-
-            if last_canvas is not None:
-                cv2.imshow("Reconstructed (FULL)", last_canvas)
-            if cv2.waitKey(1) & 0xFF == 27:
-                break
-            continue
+                cv2.imshow("Reconstructed (FULL)", canvas)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
+                continue
 
         p = 0
         frame_type = decompressed[p:p+1]; p += 1
