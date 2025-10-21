@@ -12,7 +12,7 @@ FULL_BATCH_ENABLE = False
 FULL_BATCH_COUNT = 3  # number of full frames to group per message (>=1)
 COLORED_CONTOURS = True  # visualize contour efficiency
 
-def simplify_boundary(boundary, epsilon=2.0):
+def simplify_boundary(boundary, epsilon=3.0):
     """
     Simplify a boundary using OpenCV's implementation of Ramer-Douglas-Peucker (RDP) algorithm.
 
@@ -111,7 +111,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
     # Simplify ALL contours first (RDP)
     start = time.time()
-    simplified_all = [simplify_boundary(b, epsilon=2.0) for b in valid_contours]
+    simplified_all = [simplify_boundary(b, epsilon=3.0) for b in valid_contours]
     simplified_all = [s for s in simplified_all if len(s.shape) == 2 and s.shape[0] >= 3]
     times['simplification'] = time.time() - start
 
