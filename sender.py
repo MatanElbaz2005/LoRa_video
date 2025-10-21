@@ -4,7 +4,6 @@ import time
 import zstandard as zstd
 import socket
 import struct
-from decode_frame import decode_frame, decode_frame_delta
 
 # Mode switch
 FULL_MODE = True
