@@ -88,13 +88,10 @@ def decode_frame(compressed_data, image_shape=(512, 512)):
             cv2.polylines(canvas, [contour], isClosed=True, color=255, thickness=1)
     times['draw_boundaries'] = time.time() - start
 
-    # Print timing breakdown
-    # print("Timing breakdown (seconds):")
-    for step, t in times.items():
-        # print(f"  {step}: {t:.4f}")
-        pass
-    # print(f"Total time: {sum(times.values()):.4f}")
-
+    total_t = sum(times.values())
+    ordered = [(k, times[k]) for k in sorted(times.keys())]
+    breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
+    print(f"[DECODE breakdown] total={total_t*1000:.1f}ms {breakdown}")
     return canvas
 
 def decode_frame_delta(prev_canvas: np.ndarray, compressed_delta: bytes, image_shape=(512, 512)):
@@ -104,15 +101,28 @@ def decode_frame_delta(prev_canvas: np.ndarray, compressed_delta: bytes, image_s
         updated_canvas: prev_canvas XOR delta_canvas
         delta_canvas:   the drawn delta-only canvas (for debugging/vis)
     """
+    # Timings
+    times = {}
+
     # 1) Decode delta to a binary canvas
+    start = time.time()
     delta_canvas = decode_frame(compressed_delta, image_shape=image_shape)
+    times['decode_frame'] = time.time() - start
 
     # 2) Apply XOR with the previous reconstructed canvas
+    start = time.time()
     if prev_canvas is None:
         # first frame delta == full frame
         updated = delta_canvas.copy()
     else:
         updated = cv2.bitwise_xor(prev_canvas, delta_canvas)
+    times['xor_apply'] = time.time() - start
+
+    # Report
+    total_t = sum(times.values())
+    ordered = [(k, times[k]) for k in sorted(times.keys())]
+    breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
+    print(f"[DECODE-DELTA breakdown] total={total_t*1000:.1f}ms {breakdown}")
 
     return updated, delta_canvas
 
@@ -200,11 +210,16 @@ if __name__ == "__main__":
     prev_canvas = None
     while True:
         # --- Read 4-byte length header ---
+        t_cycle = time.time()
+        t0 = time.time()
         length_data = recv_exact(conn, 4)
         if not length_data: break
         msg_len = struct.unpack(">I", length_data)[0]
+        t_header = time.time() - t0
 
+        t1 = time.time()
         payload = recv_exact(conn, msg_len)
+        t_payload = time.time() - t1
         if not payload: break
 
         # decompress payload
@@ -246,17 +261,30 @@ if __name__ == "__main__":
 
             else:
                 # BATCH OFF: single-frame FULL
+                t2 = time.time()
                 contours = decode_full_relative_payload(decompressed)
                 canvas = np.zeros((512, 512), dtype=np.uint8)
+                t_decode = time.time() - t2
                 for pts in contours:
                     if isinstance(pts, np.ndarray) and pts.ndim == 2 and pts.shape[0] >= 3 and pts.shape[1] == 2:
                         try:
                             cv2.polylines(canvas, [np.ascontiguousarray(pts.astype(np.int32)).reshape(-1,1,2)], True, 255, 1)
                         except Exception as e:
                             print(f"[DRAW FAIL] full pts shape={pts.shape} err={e}")
+                t3 = time.time()
                 cv2.imshow("Reconstructed (FULL)", canvas)
+                t_display = time.time() - t3
                 if cv2.waitKey(1) & 0xFF == 27:
                     break
+                t_total = time.time() - t_cycle
+                print(
+                    "[RECEIVER timing FULL] "
+                    f"header={t_header*1000:.1f}ms "
+                    f"payload={t_payload*1000:.1f}ms "
+                    f"decode+render={t_decode*1000:.1f}ms "
+                    f"display={t_display*1000:.1f}ms "
+                    f"total={t_total*1000:.1f}ms"
+                )
                 continue
 
         p = 0

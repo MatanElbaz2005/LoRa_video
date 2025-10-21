@@ -223,11 +223,10 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times['compression'] = time.time() - start
 
     # Print timing breakdown
-    # print("Timing breakdown (seconds):")
-    for step, t in times.items():
-        # print(f"  {step}: {t:.4f}")
-        pass
-    # print(f"Total time: {sum(times.values()):.4f}")
+    total_t = sum(times.values())
+    ordered = [(k, times[k]) for k in sorted(times.keys())]
+    breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
+    print(f"[ENCODE breakdown] total={total_t*1000:.1f}ms {breakdown}")
     return compressed, img_binary, simplified, (512, 512), bands_info
 
 
@@ -390,7 +389,10 @@ if __name__ == "__main__":
     _full_batch_raw = []
     prev_edges = None
     while True:
+        t_cycle = time.time()
+        t0 = time.time()
         ret, frame = cap.read()
+        t_capture = time.time() - t0
         if not ret:
             if VIDEO_MODE:
                 print("[Sender] End of video or read error; stopping.")
@@ -401,9 +403,11 @@ if __name__ == "__main__":
         start_cycle = time.time()
 
         # FULL FRAME: encode + decode
+        t1 = time.time()
         compressed_full, img_binary, simplified, _, bands_info = encode_frame(
             frame, percentile_pin=50, scharr_percentile=92
         )
+        t_encode = time.time() - t1
         curr_contours = simplified
 
         # FULL (hypothetical) payload size vs fixed baseline
@@ -445,6 +449,7 @@ if __name__ == "__main__":
                     )
                     _full_batch_raw.clear()
 
+                print(f"[ENCODE total-cycle] frame={frame_id} elapsed={(time.time()-start_cycle)*1000:.1f}ms")
                 frame_id += 1
                 continue
 
@@ -452,7 +457,9 @@ if __name__ == "__main__":
                 # BATCH OFF: classic single-frame FULL
                 full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
                 full_bytes = len(full_rel_comp)
+                t2 = time.time()
                 sock.sendall(struct.pack(">I", full_bytes) + full_rel_comp)
+                t_pack_and_send = time.time() - t2
 
                 print(
                     f"[FULL] {_fmt_kb(full_bytes)} ({_pct(full_bytes, RAW_BASELINE_BGR)} of raw) "
@@ -548,6 +555,15 @@ if __name__ == "__main__":
                     cv2.waitKey(1)
 
                 frame_id += 1
+                t_total = time.time() - t_cycle
+                print(
+                    "[SENDER timing] "
+                    f"frame={frame_id} "
+                    f"capture={t_capture*1000:.1f}ms "
+                    f"encode={t_encode*1000:.1f}ms "
+                    f"pack+send={t_pack_and_send*1000:.1f}ms "
+                    f"total={t_total*1000:.1f}ms"
+                )
                 continue
 
 
