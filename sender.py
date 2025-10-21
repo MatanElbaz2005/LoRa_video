@@ -10,7 +10,9 @@ from decode_frame import decode_frame, decode_frame_delta
 FULL_MODE = True
 FULL_BATCH_ENABLE = False
 FULL_BATCH_COUNT = 3  # number of full frames to group per message (>=1)
-COLORED_CONTOURS = True  # visualize contour efficiency
+COLORED_CONTOURS = False  # visualize contour efficiency
+VIDEO_MODE = True
+VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\with_faces_2.mp4"
 
 def simplify_boundary(boundary, epsilon=3.0):
     """
@@ -232,13 +234,15 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
 # Example usage for live camera
 if __name__ == "__main__":
-    cap = cv2.VideoCapture(0)  # 0 for default webcam
+    src = VIDEO_PATH if VIDEO_MODE else 0
+    cap = cv2.VideoCapture(src)
     # --- Network setup ---
     HOST = "127.0.0.1"
     PORT = 5001
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
     print(f"[Sender] Connected to receiver on {HOST}:{PORT}")
+    print(f"[Sender] Input source: {'VIDEO file' if VIDEO_MODE else 'LIVE camera'} ({src})")
     if not cap.isOpened():
         raise RuntimeError("Failed to open webcam")
 
@@ -389,6 +393,10 @@ if __name__ == "__main__":
     while True:
         ret, frame = cap.read()
         if not ret:
+            if VIDEO_MODE:
+                print("[Sender] End of video or read error; stopping.")
+            else:
+                print("[Sender] Camera read failed; stopping.")
             break
         
         start_cycle = time.time()
