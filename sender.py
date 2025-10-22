@@ -4,6 +4,10 @@ import time
 import zstandard as zstd
 import socket
 import struct
+try:
+    from picamera2 import Picamera2
+except Exception:
+    Picamera2 = None
 
 # Mode switch
 FULL_MODE = True
@@ -12,6 +16,9 @@ FULL_BATCH_COUNT = 3  # number of full frames to group per message (>=1)
 COLORED_CONTOURS = False  # visualize contour efficiency
 VIDEO_MODE = True
 VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\with_faces_2.mp4"
+CAMERA_BACKEND = "PICAM2"  # set to "OPENCV" on Windows/USB, "PICAM2" on Raspberry Pi
+PICAM2_SIZE = (640, 480)
+PICAM2_FORMAT = "RGB888"
 
 def simplify_boundary(boundary, epsilon=3.0):
     """
@@ -232,17 +239,38 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
 # Example usage for live camera
 if __name__ == "__main__":
-    src = VIDEO_PATH if VIDEO_MODE else 0
-    cap = cv2.VideoCapture(src)
+    if VIDEO_MODE:
+        src = VIDEO_PATH
+        cap = cv2.VideoCapture(src)
+        input_desc = f"VIDEO file ({src})"
+    else:
+        if CAMERA_BACKEND.upper() == "PICAM2":
+            if Picamera2 is None:
+                raise RuntimeError("Picamera2 not available. Install 'python3-picamera2' or set CAMERA_BACKEND='OPENCV'.")
+            picam = Picamera2()
+            picam.configure(picam.create_preview_configuration(main={"size": PICAM2_SIZE, "format": PICAM2_FORMAT}))
+            picam.start()
+            cap = None
+            input_desc = f"PICAM2 {PICAM2_SIZE} {PICAM2_FORMAT}"
+        else:
+            src = 0
+            cap = cv2.VideoCapture(src)
+            input_desc = "LIVE camera (OpenCV)"
+
     # --- Network setup ---
     HOST = "127.0.0.1"
     PORT = 5001
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((HOST, PORT))
     print(f"[Sender] Connected to receiver on {HOST}:{PORT}")
-    print(f"[Sender] Input source: {'VIDEO file' if VIDEO_MODE else 'LIVE camera'} ({src})")
-    if not cap.isOpened():
-        raise RuntimeError("Failed to open webcam")
+    print(f"[Sender] Input source: {input_desc}")
+
+    if not VIDEO_MODE and CAMERA_BACKEND.upper() != "PICAM2":
+        if not cap.isOpened():
+            raise RuntimeError("Failed to open webcam")
+    elif VIDEO_MODE:
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open video file: {VIDEO_PATH}")
 
     # Consistent baseline (512x512x3) and helpers
     H, W = 512, 512
@@ -391,14 +419,20 @@ if __name__ == "__main__":
     while True:
         t_cycle = time.time()
         t0 = time.time()
-        ret, frame = cap.read()
-        t_capture = time.time() - t0
-        if not ret:
-            if VIDEO_MODE:
-                print("[Sender] End of video or read error; stopping.")
-            else:
-                print("[Sender] Camera read failed; stopping.")
-            break
+        if VIDEO_MODE or CAMERA_BACKEND.upper() != "PICAM2":
+            ret, frame = cap.read()
+            t_capture = time.time() - t0
+            if not ret:
+                if VIDEO_MODE:
+                    print("[Sender] End of video or read error; stopping.")
+                else:
+                    print("[Sender] Camera read failed; stopping.")
+                break
+        else:
+            frame = picam.capture_array()
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+            t_capture = time.time() - t0
+            ret = True
         
         start_cycle = time.time()
 
@@ -757,5 +791,11 @@ if __name__ == "__main__":
         frame_id += 1
     
     sock.close()
-    cap.release()
+    if VIDEO_MODE or CAMERA_BACKEND.upper() != "PICAM2":
+        cap.release()
+    else:
+        try:
+            picam.stop()
+        except Exception:
+            pass
     cv2.destroyAllWindows()
