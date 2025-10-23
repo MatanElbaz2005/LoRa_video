@@ -491,6 +491,23 @@ if __name__ == "__main__":
                 # BATCH OFF: classic single-frame FULL
                 full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
                 full_bytes = len(full_rel_comp)
+
+                # --- Zstd ratio print (raw vs compressed) ---
+                full_raw_uncomp, _ = pack_full_relative_raw(curr_contours)
+                raw_len  = len(full_raw_uncomp)
+                comp_len = full_bytes
+                if raw_len > 0:
+                    ratio = (raw_len / comp_len) if comp_len > 0 else float('inf')
+                    saved = (1.0 - (comp_len / raw_len)) * 100.0
+                else:
+                    ratio = float('inf')
+                    saved = 0.0
+                print(
+                    f"[ZSTD ratio] raw={raw_len} B ({_fmt_kb(raw_len)})  ->  "
+                    f"comp={comp_len} B ({_fmt_kb(comp_len)})  "
+                    f"ratio={ratio:.2f}x  saved={saved:.1f}%"
+                )
+
                 t2 = time.time()
                 sock.sendall(struct.pack(">I", full_bytes) + full_rel_comp)
                 t_pack_and_send = time.time() - t2
