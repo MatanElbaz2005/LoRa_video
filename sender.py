@@ -4,10 +4,17 @@ import time
 import zstandard as zstd
 import socket
 import struct
+from utils_samples import save_sample
 try:
     from picamera2 import Picamera2
 except Exception:
     Picamera2 = None
+
+ZSTD_DICT_PATH = "contours_full_128k.zdict"
+
+with open(ZSTD_DICT_PATH, "rb") as f:
+    _DICT_BYTES = f.read()
+_ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
 
 # Mode switch
 FULL_MODE = True
@@ -15,8 +22,8 @@ FULL_BATCH_ENABLE = False
 FULL_BATCH_COUNT = 3  # number of full frames to group per message (>=1)
 COLORED_CONTOURS = False  # visualize contour efficiency
 VIDEO_MODE = True
-VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\with_faces_2.mp4"
-CAMERA_BACKEND = "PICAM2"  # set to "OPENCV" on Windows/USB, "PICAM2" on Raspberry Pi
+VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
+CAMERA_BACKEND = "OPENCV"  # set to "OPENCV" on Windows/USB, "PICAM2" on Raspberry Pi
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
 
@@ -373,7 +380,8 @@ if __name__ == "__main__":
             elif mode == b"8": cnt_8 += 1
             elif mode == b"6": cnt_6 += 1
 
-        comp = zstd.ZstdCompressor(level=22).compress(bytes(buf))
+        # save_sample("full", bytes(buf))
+        comp = zstd.ZstdCompressor(level=22, dict_data=_ZDICT).compress(bytes(buf))
         return comp, (cnt_A, cnt_8, cnt_6)
 
         
