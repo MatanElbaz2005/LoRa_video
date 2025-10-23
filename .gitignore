@@ -8,3 +8,4 @@ __pycache__/
 *.zst
 *.mov
 *.mp4
+*.zdict
