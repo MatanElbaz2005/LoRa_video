@@ -32,3 +32,4 @@ if __name__ == "__main__":
     with open(out_path, "wb") as f:
         f.write(cdict.as_bytes())
     print(f"Dictionary saved to {out_path}")
+    print(f"Trained on {len(samples)} frames")

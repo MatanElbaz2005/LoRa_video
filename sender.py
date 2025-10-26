@@ -10,12 +10,6 @@ try:
 except Exception:
     Picamera2 = None
 
-ZSTD_DICT_PATH = "contours_full_128k.zdict"
-
-with open(ZSTD_DICT_PATH, "rb") as f:
-    _DICT_BYTES = f.read()
-_ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
-
 # Mode switch
 FULL_MODE = True
 FULL_BATCH_ENABLE = False
@@ -27,6 +21,14 @@ CAMERA_BACKEND = "OPENCV"  # set to "OPENCV" on Windows/USB, "PICAM2" on Raspber
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
 USE_ZDICT = True
+SAVE_ZDICT_SAMPLES = True
+SAMPLE_MAX_PER_RUN = 3000
+ZSTD_DICT_PATH = "contours_full_128k.zdict"
+
+if USE_ZDICT:
+    with open(ZSTD_DICT_PATH, "rb") as f:
+        _DICT_BYTES = f.read()
+    _ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
 
 def simplify_boundary(boundary, epsilon=3.0):
     """
@@ -285,6 +287,26 @@ if __name__ == "__main__":
     RAW_BASELINE_BGR = H * W * 3
     RAW_BASELINE_KB = RAW_BASELINE_BGR / 1024.0
 
+    # ZSTD sampling (save exactly 20 evenly-spaced samples per run)
+    if SAVE_ZDICT_SAMPLES:
+        saved_samples = 0
+        sample_positions = set()
+        live_stride = None
+        if VIDEO_MODE:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap is not None else 0
+            if total_frames > 0:
+                import numpy as _np
+                _idxs = _np.linspace(0, max(0, total_frames - 1), num=min(SAMPLE_MAX_PER_RUN, total_frames), dtype=int)
+                sample_positions = set(int(i) for i in _idxs.tolist())
+        else:
+            fps = cap.get(cv2.CAP_PROP_FPS) if cap is not None else 30.0
+            try:
+                fps = float(fps)
+                if not (fps > 0): fps = 30.0
+            except Exception:
+                fps = 30.0
+            live_stride = max(1, int(fps * 2))
+
     # Object-Delta state & matching params
     NEXT_ID = 1                      # counter for new contour IDs
     free_ids = set()                 # recycled IDs released from deleted contours
@@ -381,7 +403,6 @@ if __name__ == "__main__":
             elif mode == b"8": cnt_8 += 1
             elif mode == b"6": cnt_6 += 1
 
-        # save_sample("full", bytes(buf))
         if USE_ZDICT:
             comp = zstd.ZstdCompressor(level=22, dict_data=_ZDICT).compress(bytes(buf))
         else:
@@ -506,6 +527,11 @@ if __name__ == "__main__":
 
                 # --- Zstd ratio print (raw vs compressed) ---
                 full_raw_uncomp, _ = pack_full_relative_raw(curr_contours)
+                if SAVE_ZDICT_SAMPLES:
+                    if saved_samples < SAMPLE_MAX_PER_RUN:
+                        if (VIDEO_MODE and (frame_id in sample_positions)) or (not VIDEO_MODE and (live_stride and frame_id % live_stride == 0)):
+                            save_sample("full", full_raw_uncomp)
+                            saved_samples += 1
                 raw_len  = len(full_raw_uncomp)
                 comp_len = full_bytes
                 if raw_len > 0:
