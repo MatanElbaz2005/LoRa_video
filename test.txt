@@ -1,0 +1,25 @@
+"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
+
+WITH DICT
+[ZSTD ratio] raw=1530 B (1.49 KB)  ->  comp=977 B (0.95 KB)  ratio=1.57x  saved=36.1%
+[ZSTD ratio] raw=1608 B (1.57 KB)  ->  comp=1001 B (0.98 KB)  ratio=1.61x  saved=37.7%
+[ZSTD ratio] raw=1679 B (1.64 KB)  ->  comp=1017 B (0.99 KB)  ratio=1.65x  saved=39.4%
+
+WITHOUT DICT
+[ZSTD ratio] raw=1530 B (1.49 KB)  ->  comp=1099 B (1.07 KB)  ratio=1.39x  saved=28.2%
+[ZSTD ratio] raw=1608 B (1.57 KB)  ->  comp=1138 B (1.11 KB)  ratio=1.41x  saved=29.2%
+[ZSTD ratio] raw=1679 B (1.64 KB)  ->  comp=1156 B (1.13 KB)  ratio=1.45x  saved=31.1%
+
+times:
+[SENDER timing] frame=2 capture=8.6ms encode=28.4ms build_fullpack=15.0ms pack+send=0.0ms other=0.0ms total=52.0ms
+[ENCODE breakdown]
+ total=23.7ms
+  band_metric=0.0ms
+   band_select=0.0ms
+    clahe=0.0ms
+     edge_detection=15.2ms
+      median_filter=0.0ms
+       morph_close=0.0ms
+        preprocess=4.0ms
+         simplification=4.6ms
+[RECEIVER timing FULL] header=19.1ms payload=0.0ms decode+render=0.0ms display=2.9ms total=22.4ms
