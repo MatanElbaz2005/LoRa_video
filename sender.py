@@ -52,9 +52,9 @@ def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
     upper = int(min(255, (1.0 + sigma) * v))
     return cv2.Canny(img_u8, lower, upper, apertureSize=aperture_size, L2gradient=l2)
 
-def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
+def encode_frame(frame, percentile_pin=50, scharr_percentile=92, return_info=False):
     """
-    Process a frame to extract, simplify, and compress connected component boundaries.
+    Process a frame to extract and simplify connected component boundaries.
 
     The pipeline includes:
     1. Resize to 512x512, convert to grayscale.
@@ -71,9 +71,8 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
         percentile_pin (float): Percentage of top CCs to process (e.g., 50 for top 50%).
 
     Returns:
-        bytes: Compressed boundary data.
-        np.ndarray: Binary image.
-        list: Simplified polygons for reconstruction.
+        tuple: (simplified: list[np.ndarray], bands_info_or_none: dict|None)
+               bands_info is returned only if return_info=True, else None.
     """
     times = {}  # Store timing for each step
 
@@ -135,7 +134,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
     if not simplified_all:
         simplified = []
-        bands_info = {
+        bands_info = None if not return_info else {
             "all_simplified": [],
             "band_idx": np.array([], dtype=np.int32),
             "effvals": np.array([], dtype=np.float32),
@@ -208,43 +207,29 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
         simplified = [simplified_all[i] for i in selected_idx]
         times['band_select'] = time.time() - start
+        bands_info = None
+        if return_info:
+            bands_info = {
+                "all_simplified": simplified_all,
+                "band_idx": band_idx,
+                "effvals": effvals,
+                "selected_idx": np.array(selected_idx, dtype=np.int32),
+                "palette": [
+                    (255,255,255),  # white
+                    (255,  0,  0),  # blue
+                    (  0,255,255),  # yellow
+                    (  0,165,255),  # orange
+                    (  0,  0,255),  # red
+                ],
+                "labels": ["Top 20%","20-40%","40-60%","60-80%","Bottom 20%"],
+            }
 
-        bands_info = {
-            "all_simplified": simplified_all,
-            "band_idx": band_idx,
-            "effvals": effvals,
-            "selected_idx": np.array(selected_idx, dtype=np.int32),
-            "palette": [
-                (255,255,255),  # white
-                (255,  0,  0),  # blue
-                (  0,255,255),  # yellow
-                (  0,165,255),  # orange
-                (  0,  0,255),  # red
-            ],
-            "labels": ["Top 20%","20-40%","40-60%","60-80%","Bottom 20%"],
-        }
-
-
-    # Prepare data for compression: store number of boundaries and lengths
-    start = time.time()
-    if simplified:
-        num_boundaries = len(simplified)
-        boundary_lengths = [len(b) for b in simplified]
-        all_points = np.vstack(simplified).astype(np.int16)
-        # Create header: num_boundaries (int32) + lengths (int32 array)
-        header = np.array([num_boundaries] + boundary_lengths, dtype=np.int32)
-        data_to_compress = header.tobytes() + all_points.tobytes()
-    else:
-        data_to_compress = np.array([], dtype=np.int16).tobytes()
-    compressed = zstd.ZstdCompressor(level=22).compress(data_to_compress)
-    times['compression'] = time.time() - start
-
-    # Print timing breakdown
+    # Print timing breakdownimg_binary
     total_t = sum(times.values())
     ordered = [(k, times[k]) for k in sorted(times.keys())]
     breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
     print(f"[ENCODE breakdown] total={total_t*1000:.1f}ms {breakdown}")
-    return compressed, img_binary, simplified, (512, 512), bands_info
+    return simplified, bands_info
 
 
 # Example usage for live camera
@@ -469,13 +454,12 @@ if __name__ == "__main__":
         
         start_cycle = time.time()
         t_build_fullpack = 0.0
-        t_ratio_calc = 0.0
         t_pack_and_send = 0.0
 
         # FULL FRAME: encode + decode
         t1 = time.time()
-        compressed_full, img_binary, simplified, _, bands_info = encode_frame(
-            frame, percentile_pin=50, scharr_percentile=92
+        simplified, bands_info = encode_frame(
+            frame, percentile_pin=50, scharr_percentile=92, return_info=COLORED_CONTOURS
         )
         t_encode = time.time() - t1
         curr_contours = simplified
@@ -527,29 +511,6 @@ if __name__ == "__main__":
 
             else:
                 # BATCH OFF: classic single-frame FULL
-                # --- Zstd ratio print (raw vs compressed) ---
-                t_ratio0 = time.time()
-                full_raw_uncomp, _ = pack_full_relative_raw(curr_contours)
-                if SAVE_ZDICT_SAMPLES:
-                    if saved_samples < SAMPLE_MAX_PER_RUN:
-                        if (VIDEO_MODE and (frame_id in sample_positions)) or (not VIDEO_MODE and (live_stride and frame_id % live_stride == 0)):
-                            save_sample("full", full_raw_uncomp)
-                            saved_samples += 1
-                raw_len  = len(full_raw_uncomp)
-                comp_len = full_bytes
-                if raw_len > 0:
-                    ratio = (raw_len / comp_len) if comp_len > 0 else float('inf')
-                    saved = (1.0 - (comp_len / raw_len)) * 100.0
-                else:
-                    ratio = float('inf')
-                    saved = 0.0
-                t_ratio_calc = time.time() - t_ratio0
-                print(
-                    f"[ZSTD ratio] raw={raw_len} B ({_fmt_kb(raw_len)})  ->  "
-                    f"comp={comp_len} B ({_fmt_kb(comp_len)})  "
-                    f"ratio={ratio:.2f}x  saved={saved:.1f}%"
-                )
-
                 t2 = time.time()
                 sock.sendall(struct.pack(">I", full_bytes) + full_rel_comp)
                 t_pack_and_send = time.time() - t2
@@ -649,7 +610,7 @@ if __name__ == "__main__":
 
                 frame_id += 1
                 t_total = time.time() - t_cycle
-                accounted = (t_capture + t_encode + t_build_fullpack + t_ratio_calc + t_pack_and_send)
+                accounted = (t_capture + t_encode + t_build_fullpack + t_pack_and_send)
                 t_other = max(0.0, t_total - accounted)
                 print(
                     "[SENDER timing] "
@@ -657,7 +618,6 @@ if __name__ == "__main__":
                     f"capture={t_capture*1000:.1f}ms "
                     f"encode={t_encode*1000:.1f}ms "
                     f"build_fullpack={t_build_fullpack*1000:.1f}ms "
-                    f"ratio_calc={t_ratio_calc*1000:.1f}ms "
                     f"pack+send={t_pack_and_send*1000:.1f}ms "
                     f"other={t_other*1000:.1f}ms "
                     f"total={t_total*1000:.1f}ms"
