@@ -9,15 +9,20 @@ import struct
 
 ZSTD_DICT_PATH = "contours_full_128k.zdict"
 
-with open(ZSTD_DICT_PATH, "rb") as f:
-    _DICT_BYTES = f.read()
-_ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
-ZD = zstd.ZstdDecompressor(dict_data=_ZDICT)
-
 # Mode switch
 FULL_MODE = True
 FULL_BATCH_ENABLE = False
 FULL_BATCH_COUNT = 3
+USE_ZDICT = True
+
+with open(ZSTD_DICT_PATH, "rb") as f:
+    _DICT_BYTES = f.read()
+_ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
+
+if USE_ZDICT:
+    ZD = zstd.ZstdDecompressor(dict_data=_ZDICT)
+else:
+    ZD = zstd.ZstdDecompressor()
 
 def recv_exact(sock, n):
     data = b""

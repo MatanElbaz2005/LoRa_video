@@ -26,6 +26,7 @@ VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
 CAMERA_BACKEND = "OPENCV"  # set to "OPENCV" on Windows/USB, "PICAM2" on Raspberry Pi
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
+USE_ZDICT = True
 
 def simplify_boundary(boundary, epsilon=3.0):
     """
@@ -381,7 +382,10 @@ if __name__ == "__main__":
             elif mode == b"6": cnt_6 += 1
 
         # save_sample("full", bytes(buf))
-        comp = zstd.ZstdCompressor(level=22, dict_data=_ZDICT).compress(bytes(buf))
+        if USE_ZDICT:
+            comp = zstd.ZstdCompressor(level=22, dict_data=_ZDICT).compress(bytes(buf))
+        else:
+            comp = zstd.ZstdCompressor(level=22).compress(bytes(buf))
         return comp, (cnt_A, cnt_8, cnt_6)
 
         
