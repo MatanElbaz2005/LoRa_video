@@ -21,7 +21,7 @@ CAMERA_BACKEND = "OPENCV"  # set to "OPENCV" on Windows/USB, "PICAM2" on Raspber
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
 USE_ZDICT = True
-SAVE_ZDICT_SAMPLES = True
+SAVE_ZDICT_SAMPLES = False
 SAMPLE_MAX_PER_RUN = 3000
 ZSTD_DICT_PATH = "contours_full_128k.zdict"
 
@@ -468,6 +468,9 @@ if __name__ == "__main__":
             ret = True
         
         start_cycle = time.time()
+        t_build_fullpack = 0.0
+        t_ratio_calc = 0.0
+        t_pack_and_send = 0.0
 
         # FULL FRAME: encode + decode
         t1 = time.time()
@@ -478,9 +481,11 @@ if __name__ == "__main__":
         curr_contours = simplified
 
         # FULL (hypothetical) payload size vs fixed baseline
+        t_fullpack0 = time.time()
         full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
         full_bytes = len(full_rel_comp)  # size if we send full frame
         num_full_contours = len(curr_contours)
+        t_build_fullpack = time.time() - t_fullpack0
 
         if FULL_MODE:
             if FULL_BATCH_ENABLE:
@@ -522,10 +527,8 @@ if __name__ == "__main__":
 
             else:
                 # BATCH OFF: classic single-frame FULL
-                full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(curr_contours)
-                full_bytes = len(full_rel_comp)
-
                 # --- Zstd ratio print (raw vs compressed) ---
+                t_ratio0 = time.time()
                 full_raw_uncomp, _ = pack_full_relative_raw(curr_contours)
                 if SAVE_ZDICT_SAMPLES:
                     if saved_samples < SAMPLE_MAX_PER_RUN:
@@ -540,6 +543,7 @@ if __name__ == "__main__":
                 else:
                     ratio = float('inf')
                     saved = 0.0
+                t_ratio_calc = time.time() - t_ratio0
                 print(
                     f"[ZSTD ratio] raw={raw_len} B ({_fmt_kb(raw_len)})  ->  "
                     f"comp={comp_len} B ({_fmt_kb(comp_len)})  "
@@ -645,12 +649,17 @@ if __name__ == "__main__":
 
                 frame_id += 1
                 t_total = time.time() - t_cycle
+                accounted = (t_capture + t_encode + t_build_fullpack + t_ratio_calc + t_pack_and_send)
+                t_other = max(0.0, t_total - accounted)
                 print(
                     "[SENDER timing] "
                     f"frame={frame_id} "
                     f"capture={t_capture*1000:.1f}ms "
                     f"encode={t_encode*1000:.1f}ms "
+                    f"build_fullpack={t_build_fullpack*1000:.1f}ms "
+                    f"ratio_calc={t_ratio_calc*1000:.1f}ms "
                     f"pack+send={t_pack_and_send*1000:.1f}ms "
+                    f"other={t_other*1000:.1f}ms "
                     f"total={t_total*1000:.1f}ms"
                 )
                 continue
