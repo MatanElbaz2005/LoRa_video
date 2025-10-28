@@ -83,25 +83,24 @@ if __name__ == "__main__":
     HOST = "127.0.0.1"
     PORT = 5001
 
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     server.bind((HOST, PORT))
-    server.listen(1)
-    print(f"[Receiver] Listening on {HOST}:{PORT} ...")
-    conn, addr = server.accept()
-    print(f"[Receiver] Connected by {addr}")
+    print(f"[Receiver-UDP] Listening on {HOST}:{PORT} ...")
 
     while True:
         t_cycle = time.time()
         t0 = time.time()
-        length_data = recv_exact(conn, 4)
-        if not length_data: break
-        msg_len = struct.unpack(">I", length_data)[0]
-        t_header = time.time() - t0
+        data, addr = server.recvfrom(65535)
+        t_recv = time.time() - t0
 
-        t1 = time.time()
-        payload = recv_exact(conn, msg_len)
-        if not payload: break
-        t_payload = time.time() - t1
+        if len(data) < 8:
+            print("[Receiver-UDP] short datagram, skip")
+            continue
+        frame_id, msg_len = struct.unpack_from(">II", data, 0)
+        payload = data[8:]
+        if len(payload) != msg_len:
+            print(f"[Receiver-UDP] length mismatch: got={len(payload)} expected={msg_len}")
+
 
         t2 = time.time()
         decompressed = ZD.decompress(payload)
@@ -124,14 +123,13 @@ if __name__ == "__main__":
 
         t_total = time.time() - t_cycle
         print(
-            "[RECEIVER timing FULL] "
-            f"header={t_header*1000:.1f}ms "
-            f"payload={t_payload*1000:.1f}ms "
+            "[RECEIVER-UDP timing FULL] "
+            f"recv={t_recv*1000:.1f}ms "
             f"decode+render={t_decode*1000:.1f}ms "
             f"display={t_display*1000:.1f}ms "
-            f"total={t_total*1000:.1f}ms"
+            f"total={t_total*1000:.1f}ms "
+            f"frame_id={frame_id}"
         )
 
-    conn.close()
     server.close()
     cv2.destroyAllWindows()

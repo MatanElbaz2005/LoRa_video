@@ -9,7 +9,7 @@ try:
 except Exception:
     Picamera2 = None
 
-VIDEO_MODE = True
+VIDEO_MODE = False
 VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
 CAMERA_BACKEND = "OPENCV"
 PICAM2_SIZE = (640, 480)
@@ -194,8 +194,8 @@ if __name__ == "__main__":
 
     HOST = "127.0.0.1"
     PORT = 5001
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((HOST, PORT))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    print(f"[Sender-UDP] Target {HOST}:{PORT}")
     print(f"[Sender] Connected to receiver on {HOST}:{PORT}")
     print(f"[Sender] Input source: {input_desc}")
 
@@ -231,7 +231,9 @@ if __name__ == "__main__":
         t_pack = time.time() - t2
 
         t3 = time.time()
-        sock.sendall(struct.pack(">I", full_bytes) + full_rel_comp)
+        udp_header = struct.pack(">II", frame_id, full_bytes)  # frame_id, length
+        packet = udp_header + full_rel_comp
+        sock.sendto(packet, (HOST, PORT))
         t_send = time.time() - t3
 
         num_contours = len(contours)
