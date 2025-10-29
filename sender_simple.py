@@ -201,8 +201,8 @@ if __name__ == "__main__":
         total_bytes_sent = 0
         start_pack_and_send_all = time.time()
         
-        # Use 7 bits for frame_id, wrapping around at 128
-        frame_id_7bit = frame_id % 128
+        # Use 6 bits for frame_id, wrapping around at 64
+        frame_id_6bit = frame_id % 64
 
         for pts in contours:
             pts = pts.astype(np.int16)
@@ -210,17 +210,19 @@ if __name__ == "__main__":
             
             # Skip contours that returned None
             if mode_b is None:
-                full_A += 1
+                full_A += 1 # Still count it as a skipped 'A' contour
                 continue
+
+            # Map current modes to 2 bits: 00 for '8', 01 for '6'
             if   mode_b == b"8": 
                 full_8 += 1
-                mode_bit = 0
+                mode_bits = 0 # Binary 00
             elif mode_b == b"6": 
                 full_6 += 1
-                mode_bit = 1
+                mode_bits = 1 # Binary 01
             
-            # Pack 7-bit ID and 1-bit mode into a single byte
-            header_byte = (frame_id_7bit << 1) | mode_bit
+            # Pack 6-bit ID and 2-bit mode into a single byte
+            header_byte = (frame_id_6bit << 2) | mode_bits
             
             # packet: 1-byte header + payload
             packet = struct.pack(">B", header_byte) + payload
@@ -232,7 +234,7 @@ if __name__ == "__main__":
         # Add total_bytes_sent to the print
         print(
             f"[SENDER-STATS] "
-            f"frame={frame_id} (ID_7bit={frame_id_7bit}) "
+            f"frame={frame_id} (ID_7bit={frame_id_6bit}) "
             f"contours={num_contours} (sent={full_8+full_6}, skipped_A={full_A}) "
             f"modes (8/6)={full_8}/{full_6} "
             f"total_KB={(total_bytes_sent / 1024.0):.1f}"

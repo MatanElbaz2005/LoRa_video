@@ -40,21 +40,30 @@ if __name__ == "__main__":
         
         # Unpack the 1-byte header
         header_byte = data[0]
-        frame_id = header_byte >> 1  # Get first 7 bits
-        mode_bit = header_byte & 0x01 # Get last 1 bit
+        frame_id = header_byte >> 2  # Get first 6 bits
+        mode_bits = header_byte & 0x03 # Get last 2 bits
         
-        mode_u8 = ord('8') if mode_bit == 0 else ord('6')
+        # Map mode_bits back to mode_u8 for existing logic
+        if mode_bits == 0:
+             mode_u8 = ord('8')
+        elif mode_bits == 1:
+             mode_u8 = ord('6')
+        else:
+            print(f"[Receiver-UDP] Received packet with unused mode_bits={mode_bits}. Discarding.")
+            continue 
+
         payload = data[1:]
 
         # Handle first-ever packet
         if current_frame_id == -1:
             current_frame_id = frame_id
 
-        diff = (frame_id - current_frame_id + 128) % 128
+        # 6-bit sequence arithmetic logic with a 32-frame window
+        diff = (frame_id - current_frame_id + 64) % 64
 
         if diff == 0:
             pass
-        elif diff < 64:
+        elif diff < 32:
             # Display the *previous* frame, which is now complete
             if current_frame_id >= 0:
                 # Calculate time since last display
@@ -77,7 +86,7 @@ if __name__ == "__main__":
             contours_in_frame = 0
             t_last_frame_start = time.time()
         
-        else: # diff >= 64
+        else: # diff >= 32
             print(f"[Receiver-UDP] Stale/OOR packet frame={frame_id}, current={current_frame_id}. Discarding.")
             continue
 
