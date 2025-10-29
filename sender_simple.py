@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import time
-import zstandard as zstd
 import socket
 import struct
 try:
@@ -14,13 +13,6 @@ VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
 CAMERA_BACKEND = "OPENCV"
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
-USE_ZDICT = True
-ZSTD_DICT_PATH = "contours_full_128k.zdict"
-
-if USE_ZDICT:
-    with open(ZSTD_DICT_PATH, "rb") as f:
-        _DICT_BYTES = f.read()
-    _ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
 
 def simplify_boundary(boundary, epsilon=3.0):
     boundary = boundary.astype(np.float32)
@@ -156,24 +148,6 @@ def encode_contour_relative(pts_i16: np.ndarray):
     else:
         return b"A", pts_i16.tobytes()
 
-def pack_full_relative(contours):
-    buf = bytearray()
-    cnt_A = cnt_8 = cnt_6 = 0
-    for pts in contours:
-        pts = pts.astype(np.int16)
-        L = pts.shape[0]
-        buf.extend(struct.pack(">H", L))
-        mode, encoded = encode_contour_relative(pts)
-        buf.extend(mode)
-        buf.extend(encoded)
-        if mode == b"A": cnt_A += 1
-        elif mode == b"8": cnt_8 += 1
-        elif mode == b"6": cnt_6 += 1
-    if USE_ZDICT:
-        comp = zstd.ZstdCompressor(level=22, dict_data=_ZDICT).compress(bytes(buf))
-    else:
-        comp = zstd.ZstdCompressor(level=22).compress(bytes(buf))
-    return comp, (cnt_A, cnt_8, cnt_6)
 
 if __name__ == "__main__":
     if VIDEO_MODE:
@@ -225,34 +199,47 @@ if __name__ == "__main__":
         contours = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
         t_encode = time.time() - t1
 
-        t2 = time.time()
-        full_rel_comp, (full_A, full_8, full_6) = pack_full_relative(contours)
-        full_bytes = len(full_rel_comp)
-        t_pack = time.time() - t2
-
-        t3 = time.time()
-        udp_header = struct.pack(">II", frame_id, full_bytes)  # frame_id, length
-        packet = udp_header + full_rel_comp
-        sock.sendto(packet, (HOST, PORT))
-        t_send = time.time() - t3
+        full_A = full_8 = full_6 = 0
+        total_bytes_sent = 0
+        start_pack_and_send_all = time.time()
+        for pts in contours:
+            pts = pts.astype(np.int16)
+            mode_b, payload = encode_contour_relative(pts)  # returns b"A"/b"8"/b"6", bytes
+            if   mode_b == b"A": full_A += 1
+            elif mode_b == b"8": full_8 += 1
+            elif mode_b == b"6": full_6 += 1
+            mode_u8 = mode_b[0]
+            packet = struct.pack(">IB", frame_id, mode_u8) + payload
+            total_bytes_sent += len(packet)
+            sock.sendto(packet, (HOST, PORT))
+        end_pack_and_send_all = time.time() - start_pack_and_send_all
 
         num_contours = len(contours)
-        print(f"[FULL] {full_bytes/1024.0:.2f} KB ({(full_bytes/RAW_BASELINE_BGR)*100.0:.2f}% of raw) "
-              f"contours={num_contours} raw={RAW_BASELINE_KB:.2f} KB")
-        print(f"[FULL modes] A={full_A} 8={full_8} 6={full_6}")
+        # Add total_bytes_sent to the print
+        print(
+            f"[SENDER-STATS] "
+            f"frame={frame_id} "
+            f"contours={num_contours} "
+            f"modes (A/8/6)={full_A}/{full_8}/{full_6} "
+            f"total_KB={(total_bytes_sent / 1024.0):.1f}"
+             )
 
         t_total = time.time() - t_cycle
-        t_other = max(0.0, t_total - (t_capture + t_encode + t_pack + t_send))
+        t_known = t_capture + t_encode + end_pack_and_send_all
+        t_other = max(0.0, t_total - t_known)
         print(
             "[SENDER timing] "
             f"frame={frame_id} "
             f"capture={t_capture*1000:.1f}ms "
             f"encode={t_encode*1000:.1f}ms "
-            f"pack={t_pack*1000:.1f}ms "
-            f"send={t_send*1000:.1f}ms "
+            f"pack_and_send_all={end_pack_and_send_all*1000:.1f}ms "
             f"other={t_other*1000:.1f}ms "
             f"total={t_total*1000:.1f}ms"
         )
+        # Calculate and print Sender FPS
+        if t_total > 0:
+            print(f"[SENDER-FPS] {1.0 / t_total:.1f} FPS")
+
         frame_id += 1
 
     sock.close()

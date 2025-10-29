@@ -1,20 +1,8 @@
 import cv2
 import numpy as np
 import time
-import zstandard as zstd
 import socket
 import struct
-
-ZSTD_DICT_PATH = "contours_full_128k.zdict"
-USE_ZDICT = True
-
-if USE_ZDICT:
-    with open(ZSTD_DICT_PATH, "rb") as f:
-        _DICT_BYTES = f.read()
-    _ZDICT = zstd.ZstdCompressionDict(_DICT_BYTES)
-    ZD = zstd.ZstdDecompressor(dict_data=_ZDICT)
-else:
-    ZD = zstd.ZstdDecompressor()
 
 def recv_exact(sock, n):
     data = b""
@@ -25,60 +13,6 @@ def recv_exact(sock, n):
         data += packet
     return data
 
-def decode_full_relative_payload(decompressed: bytes) -> list[np.ndarray]:
-    p = 0
-    contours = []
-    n = len(decompressed)
-    while p < n:
-        if p + 2 > n: break
-        (L,) = struct.unpack_from(">H", decompressed, p); p += 2
-        if L == 0:
-            contours.append(np.empty((0,2), dtype=np.int16))
-            continue
-        if p + 1 > n: break
-        mode = decompressed[p:p+1]; p += 1
-        if mode == b"A":
-            need = 2*L*2
-            if p + need > n: break
-            pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p).reshape(L,2)
-            p += need
-        elif mode == b"8":
-            if p + 4 > n: break
-            head = np.frombuffer(decompressed, dtype=np.int16, count=2, offset=p).reshape(1,2)
-            p += 4
-            if L == 1:
-                pts = head.astype(np.int16)
-            else:
-                need = (L-1)*2
-                if p + need > n: break
-                deltas = np.frombuffer(decompressed, dtype=np.int8, count=2*(L-1), offset=p).reshape(L-1,2).astype(np.int16)
-                p += need
-                pts = np.empty((L,2), dtype=np.int16)
-                pts[0] = head[0]
-                pts[1:] = (head[0].astype(np.int32) + np.cumsum(deltas.astype(np.int32), axis=0)).astype(np.int16)
-        elif mode == b"6":
-            if p + 4 > n: break
-            head = np.frombuffer(decompressed, dtype=np.int16, count=2, offset=p).reshape(1,2)
-            p += 4
-            if L == 1:
-                pts = head.astype(np.int16)
-            else:
-                need = (L-1)*2*2
-                if p + need > n: break
-                deltas = np.frombuffer(decompressed, dtype=np.int16, count=2*(L-1), offset=p).reshape(L-1,2)
-                p += need
-                pts = np.empty((L,2), dtype=np.int16)
-                pts[0] = head[0]
-                pts[1:] = (head[0].astype(np.int32) + np.cumsum(deltas.astype(np.int32), axis=0)).astype(np.int16)
-        else:
-            need = 2*L*2
-            if p + need > n: break
-            pts = np.frombuffer(decompressed, dtype=np.int16, count=2*L, offset=p).reshape(L,2)
-            p += need
-        pts = np.clip(pts, [0,0], [511,511]).astype(np.int16)
-        contours.append(np.ascontiguousarray(pts))
-    return contours
-
 if __name__ == "__main__":
     HOST = "127.0.0.1"
     PORT = 5001
@@ -87,49 +21,98 @@ if __name__ == "__main__":
     server.bind((HOST, PORT))
     print(f"[Receiver-UDP] Listening on {HOST}:{PORT} ...")
 
+    current_frame_id = -1
+    canvas = np.zeros((512, 512), dtype=np.uint8)
+    contours_in_frame = 0
+    
+    t_last_frame_start = time.time()
+    last_update_time = time.time()
+
     while True:
         t_cycle = time.time()
         t0 = time.time()
         data, addr = server.recvfrom(65535)
-        t_recv = time.time() - t0
 
-        if len(data) < 8:
+        # header: [frame_id:U32][mode:U8]
+        if len(data) < 5:
             print("[Receiver-UDP] short datagram, skip")
             continue
-        frame_id, msg_len = struct.unpack_from(">II", data, 0)
-        payload = data[8:]
-        if len(payload) != msg_len:
-            print(f"[Receiver-UDP] length mismatch: got={len(payload)} expected={msg_len}")
+        frame_id = struct.unpack_from(">I", data, 0)[0]
+        mode_u8  = data[4]
+        payload  = data[5:]
 
+        if frame_id > current_frame_id:
+            # Display the *previous* frame, which is now complete
+            if current_frame_id >= 0:
+                # Calculate time since last display
+                t_now = time.time()
+                t_delta = t_now - t_last_frame_start
+                
+                cv2.imshow("Reconstructed (FULL/UDP)", canvas)
+                print(f"[RECV] Displaying frame {current_frame_id} with {contours_in_frame} contours.")
+                
+                # Print Receiver FPS
+                if t_delta > 0:
+                    print(f"[RECV-FPS] {1.0 / t_delta:.1f} FPS")
+                
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break # Exit the main loop
 
-        t2 = time.time()
-        decompressed = ZD.decompress(payload)
-        contours = decode_full_relative_payload(decompressed)
-        canvas = np.zeros((512, 512), dtype=np.uint8)
-        for pts in contours:
-            if isinstance(pts, np.ndarray) and pts.ndim == 2 and pts.shape[0] >= 3 and pts.shape[1] == 2:
-                try:
-                    cv2.polylines(canvas, [np.ascontiguousarray(pts.astype(np.int32)).reshape(-1,1,2)], True, 255, 1)
-                except Exception as e:
-                    print(f"[DRAW FAIL] full pts shape={pts.shape} err={e}")
-        t_decode = time.time() - t2
+            # Reset for the new frame
+            current_frame_id = frame_id
+            canvas = np.zeros((512, 512), dtype=np.uint8)
+            contours_in_frame = 0
+            t_last_frame_start = time.time() # Reset FPS timer
 
-        t3 = time.time()
-        cv2.imshow("Reconstructed (FULL)", canvas)
-        t_display = time.time() - t3
+        elif frame_id < current_frame_id:
+            print(f"[Receiver-UDP] Stale packet from frame {frame_id}, current is {current_frame_id}. Discarding.")
+            continue
 
-        if cv2.waitKey(1) & 0xFF == 27:
-            break
+        try:
+            if mode_u8 == ord('A'):
+                if len(payload) % 4 != 0:
+                    raise ValueError("A-mode payload not multiple of 4")
+                L = len(payload) // 4
+                pts = np.frombuffer(payload, dtype=np.int16, count=2*L).reshape(L, 2)
 
-        t_total = time.time() - t_cycle
-        print(
-            "[RECEIVER-UDP timing FULL] "
-            f"recv={t_recv*1000:.1f}ms "
-            f"decode+render={t_decode*1000:.1f}ms "
-            f"display={t_display*1000:.1f}ms "
-            f"total={t_total*1000:.1f}ms "
-            f"frame_id={frame_id}"
-        )
+            elif mode_u8 == ord('8'):
+                if len(payload) < 4 or (len(payload)-4) % 2 != 0:
+                    raise ValueError("8-mode payload bad size")
+                head = np.frombuffer(payload, dtype=np.int16, count=2, offset=0).reshape(1,2).astype(np.int32)
+                k = (len(payload)-4)//2
+                deltas = np.frombuffer(payload, dtype=np.int8,  count=2*k, offset=4).reshape(k,2).astype(np.int32)
+                pts = np.empty((1+k, 2), dtype=np.int32)
+                pts[0] = head[0]
+                if k:
+                    pts[1:] = head[0] + np.cumsum(deltas, axis=0)
+                pts = pts.astype(np.int16)
+
+            elif mode_u8 == ord('6'):
+                if len(payload) < 4 or (len(payload)-4) % 4 != 0:
+                    raise ValueError("6-mode payload bad size")
+                head = np.frombuffer(payload, dtype=np.int16, count=2, offset=0).reshape(1,2).astype(np.int32)
+                k = (len(payload)-4)//4
+                deltas = np.frombuffer(payload, dtype=np.int16, count=2*k, offset=4).reshape(k,2).astype(np.int32)
+                pts = np.empty((1+k, 2), dtype=np.int32)
+                pts[0] = head[0]
+                if k:
+                    pts[1:] = head[0] + np.cumsum(deltas, axis=0)
+                pts = pts.astype(np.int16)
+
+            else:
+                raise ValueError(f"unknown mode {mode_u8!r}")
+
+            pts = np.clip(pts, [0,0], [511,511]).astype(np.int32)
+            cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
+
+            contours_in_frame += 1
+            cv2.putText(canvas, f"F {current_frame_id}", (8, 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, 255, 1, cv2.LINE_AA)
+            cv2.putText(canvas, f"Contours {contours_in_frame}", (8, 44),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, 255, 1, cv2.LINE_AA)
+
+        except Exception as e:
+            print(f"[Receiver-UDP] decode error: {e}")
 
     server.close()
     cv2.destroyAllWindows()
