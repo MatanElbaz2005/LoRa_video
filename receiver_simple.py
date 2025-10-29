@@ -33,15 +33,28 @@ if __name__ == "__main__":
         t0 = time.time()
         data, addr = server.recvfrom(65535)
 
-        # header: [frame_id:U32][mode:U8]
-        if len(data) < 5:
+        # header: [frame_id:7bit][mode:1bit]
+        if len(data) < 1:
             print("[Receiver-UDP] short datagram, skip")
             continue
-        frame_id = struct.unpack_from(">I", data, 0)[0]
-        mode_u8  = data[4]
-        payload  = data[5:]
+        
+        # Unpack the 1-byte header
+        header_byte = data[0]
+        frame_id = header_byte >> 1  # Get first 7 bits
+        mode_bit = header_byte & 0x01 # Get last 1 bit
+        
+        mode_u8 = ord('8') if mode_bit == 0 else ord('6')
+        payload = data[1:]
 
-        if frame_id > current_frame_id:
+        # Handle first-ever packet
+        if current_frame_id == -1:
+            current_frame_id = frame_id
+
+        diff = (frame_id - current_frame_id + 128) % 128
+
+        if diff == 0:
+            pass
+        elif diff < 64:
             # Display the *previous* frame, which is now complete
             if current_frame_id >= 0:
                 # Calculate time since last display
@@ -62,20 +75,14 @@ if __name__ == "__main__":
             current_frame_id = frame_id
             canvas = np.zeros((512, 512), dtype=np.uint8)
             contours_in_frame = 0
-            t_last_frame_start = time.time() # Reset FPS timer
-
-        elif frame_id < current_frame_id:
-            print(f"[Receiver-UDP] Stale packet from frame {frame_id}, current is {current_frame_id}. Discarding.")
+            t_last_frame_start = time.time()
+        
+        else: # diff >= 64
+            print(f"[Receiver-UDP] Stale/OOR packet frame={frame_id}, current={current_frame_id}. Discarding.")
             continue
 
         try:
-            if mode_u8 == ord('A'):
-                if len(payload) % 4 != 0:
-                    raise ValueError("A-mode payload not multiple of 4")
-                L = len(payload) // 4
-                pts = np.frombuffer(payload, dtype=np.int16, count=2*L).reshape(L, 2)
-
-            elif mode_u8 == ord('8'):
+            if mode_u8 == ord('8'):
                 if len(payload) < 4 or (len(payload)-4) % 2 != 0:
                     raise ValueError("8-mode payload bad size")
                 head = np.frombuffer(payload, dtype=np.int16, count=2, offset=0).reshape(1,2).astype(np.int32)

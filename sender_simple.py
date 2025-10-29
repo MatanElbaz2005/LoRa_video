@@ -8,7 +8,7 @@ try:
 except Exception:
     Picamera2 = None
 
-VIDEO_MODE = False
+VIDEO_MODE = True
 VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
 CAMERA_BACKEND = "OPENCV"
 PICAM2_SIZE = (640, 480)
@@ -132,11 +132,9 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 def encode_contour_relative(pts_i16: np.ndarray):
     assert pts_i16.ndim == 2 and pts_i16.shape[1] == 2 and pts_i16.dtype == np.int16
     L = pts_i16.shape[0]
-    if L < 1:
-        return b"A", b""
+    if L < 2:
+        return None, None
     head = pts_i16[0:1].astype(np.int16)
-    if L == 1:
-        return b"A", head.tobytes()
     prev = pts_i16[:-1].astype(np.int32)
     curr = pts_i16[1:].astype(np.int32)
     deltas = (curr - prev)
@@ -146,7 +144,7 @@ def encode_contour_relative(pts_i16: np.ndarray):
     elif max_abs <= 32767:
         return b"6", head.tobytes() + deltas.astype(np.int16).tobytes()
     else:
-        return b"A", pts_i16.tobytes()
+        return None, None
 
 
 if __name__ == "__main__":
@@ -202,14 +200,30 @@ if __name__ == "__main__":
         full_A = full_8 = full_6 = 0
         total_bytes_sent = 0
         start_pack_and_send_all = time.time()
+        
+        # Use 7 bits for frame_id, wrapping around at 128
+        frame_id_7bit = frame_id % 128
+
         for pts in contours:
             pts = pts.astype(np.int16)
-            mode_b, payload = encode_contour_relative(pts)  # returns b"A"/b"8"/b"6", bytes
-            if   mode_b == b"A": full_A += 1
-            elif mode_b == b"8": full_8 += 1
-            elif mode_b == b"6": full_6 += 1
-            mode_u8 = mode_b[0]
-            packet = struct.pack(">IB", frame_id, mode_u8) + payload
+            mode_b, payload = encode_contour_relative(pts)
+            
+            # Skip contours that returned None
+            if mode_b is None:
+                full_A += 1
+                continue
+            if   mode_b == b"8": 
+                full_8 += 1
+                mode_bit = 0
+            elif mode_b == b"6": 
+                full_6 += 1
+                mode_bit = 1
+            
+            # Pack 7-bit ID and 1-bit mode into a single byte
+            header_byte = (frame_id_7bit << 1) | mode_bit
+            
+            # packet: 1-byte header + payload
+            packet = struct.pack(">B", header_byte) + payload
             total_bytes_sent += len(packet)
             sock.sendto(packet, (HOST, PORT))
         end_pack_and_send_all = time.time() - start_pack_and_send_all
@@ -218,9 +232,9 @@ if __name__ == "__main__":
         # Add total_bytes_sent to the print
         print(
             f"[SENDER-STATS] "
-            f"frame={frame_id} "
-            f"contours={num_contours} "
-            f"modes (A/8/6)={full_A}/{full_8}/{full_6} "
+            f"frame={frame_id} (ID_7bit={frame_id_7bit}) "
+            f"contours={num_contours} (sent={full_8+full_6}, skipped_A={full_A}) "
+            f"modes (8/6)={full_8}/{full_6} "
             f"total_KB={(total_bytes_sent / 1024.0):.1f}"
              )
 
