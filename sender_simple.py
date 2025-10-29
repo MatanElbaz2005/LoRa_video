@@ -3,6 +3,7 @@ import numpy as np
 import time
 import socket
 import struct
+from bitstring import BitStream
 try:
     from picamera2 import Picamera2
 except Exception:
@@ -130,21 +131,30 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     return simplified
 
 def encode_contour_relative(pts_i16: np.ndarray):
+    # This function returns the mode (int 6, 8, 10, or 16) and the raw deltas array
     assert pts_i16.ndim == 2 and pts_i16.shape[1] == 2 and pts_i16.dtype == np.int16
     L = pts_i16.shape[0]
     if L < 2:
-        return None, None
+        return None, None, None # Mode, Head, Deltas
     head = pts_i16[0:1].astype(np.int16)
     prev = pts_i16[:-1].astype(np.int32)
     curr = pts_i16[1:].astype(np.int32)
-    deltas = (curr - prev)
+    deltas = (curr - prev) # Keep deltas as int32 numpy array
     max_abs = int(np.max(np.abs(deltas))) if deltas.size else 0
-    if max_abs <= 127:
-        return b"8", head.tobytes() + deltas.astype(np.int8).tobytes()
-    elif max_abs <= 32767:
-        return b"6", head.tobytes() + deltas.astype(np.int16).tobytes()
+
+    if max_abs <= 31:      # Range for sint:6 is [-32, 31]
+        mode = 6
+    elif max_abs <= 127:   # Range for sint:8 is [-128, 127]
+        mode = 8
+    elif max_abs <= 511:   # Range for sint:10 is [-512, 511]
+        mode = 10
+    elif max_abs <= 32767: # Range for sint:16 is [-32768, 32767]
+        mode = 16
     else:
-        return None, None
+        # Deltas too large, cannot encode
+        return None, None, None
+        
+    return mode, head, deltas
 
 
 if __name__ == "__main__":
@@ -204,39 +214,50 @@ if __name__ == "__main__":
         # Use 6 bits for frame_id, wrapping around at 64
         frame_id_6bit = frame_id % 64
 
+        # Define mode mapping to 2-bit flags
+        # 00: 6-bit, 01: 8-bit, 10: 10-bit, 11: 16-bit
+        mode_map = {6: 0, 8: 1, 10: 2, 16: 3}
+        mode_counts = {6:0, 8:0, 10:0, 16:0} # For stats
+
         for pts in contours:
             pts = pts.astype(np.int16)
-            mode_b, payload = encode_contour_relative(pts)
+            mode, head, deltas = encode_contour_relative(pts)
             
-            # Skip contours that returned None
-            if mode_b is None:
-                full_A += 1 # Still count it as a skipped 'A' contour
+            # Skip contours that couldn't be encoded
+            if mode is None:
+                full_A += 1 # Count as skipped
                 continue
 
-            # Map current modes to 2 bits: 00 for '8', 01 for '6'
-            if   mode_b == b"8": 
-                full_8 += 1
-                mode_bits = 0 # Binary 00
-            elif mode_b == b"6": 
-                full_6 += 1
-                mode_bits = 1 # Binary 01
+            mode_counts[mode] += 1
+            mode_bits = mode_map[mode]
             
             # Pack 6-bit ID and 2-bit mode into a single byte
             header_byte = (frame_id_6bit << 2) | mode_bits
             
-            # packet: 1-byte header + payload
-            packet = struct.pack(">B", header_byte) + payload
-            total_bytes_sent += len(packet)
-            sock.sendto(packet, (HOST, PORT))
+            # Create a BitStream for packing
+            s = BitStream()
+            # Add the 1-byte header
+            s.append(struct.pack(">B", header_byte))
+            # Add the head point (absolute, 16-bit signed x and y)
+            s.append(f'int:16={head[0, 0]}, int:16={head[0, 1]}')
+            # Add all deltas with the determined bit length (signed)
+            format_string = f'int:{mode}'
+            for dx, dy in deltas:
+                s.append(f'{format_string}={dx}, {format_string}={dy}')
+
+            # Get the packed bytes
+            packet_payload = s.tobytes()
+            total_bytes_sent += len(packet_payload)
+            sock.sendto(packet_payload, (HOST, PORT))
         end_pack_and_send_all = time.time() - start_pack_and_send_all
 
         num_contours = len(contours)
-        # Add total_bytes_sent to the print
+        sent_count = sum(mode_counts.values())
         print(
             f"[SENDER-STATS] "
-            f"frame={frame_id} (ID_7bit={frame_id_6bit}) "
-            f"contours={num_contours} (sent={full_8+full_6}, skipped_A={full_A}) "
-            f"modes (8/6)={full_8}/{full_6} "
+            f"frame={frame_id} (ID_6bit={frame_id_6bit}) "
+            f"contours={num_contours} (sent={sent_count}, skipped={full_A}) "
+            f"modes (6/8/10/16)={mode_counts[6]}/{mode_counts[8]}/{mode_counts[10]}/{mode_counts[16]} "
             f"total_KB={(total_bytes_sent / 1024.0):.1f}"
              )
 

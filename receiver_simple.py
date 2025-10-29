@@ -3,6 +3,7 @@ import numpy as np
 import time
 import socket
 import struct
+from bitstring import BitStream, ReadError
 
 def recv_exact(sock, n):
     data = b""
@@ -43,16 +44,14 @@ if __name__ == "__main__":
         frame_id = header_byte >> 2  # Get first 6 bits
         mode_bits = header_byte & 0x03 # Get last 2 bits
         
-        # Map mode_bits back to mode_u8 for existing logic
-        if mode_bits == 0:
-             mode_u8 = ord('8')
-        elif mode_bits == 1:
-             mode_u8 = ord('6')
-        else:
-            print(f"[Receiver-UDP] Received packet with unused mode_bits={mode_bits}. Discarding.")
-            continue 
-
-        payload = data[1:]
+        # Map mode_bits to bit length (inverse of sender map)
+        mode_len_map = {0: 6, 1: 8, 2: 10, 3: 16}
+        if mode_bits not in mode_len_map:
+             print(f"[Receiver-UDP] Received packet with invalid mode_bits={mode_bits}. Discarding.")
+             continue
+        
+        mode_len = mode_len_map[mode_bits]
+        payload = data[1:] # Payload starts after the 1-byte header
 
         # Handle first-ever packet
         if current_frame_id == -1:
@@ -91,33 +90,41 @@ if __name__ == "__main__":
             continue
 
         try:
-            if mode_u8 == ord('8'):
-                if len(payload) < 4 or (len(payload)-4) % 2 != 0:
-                    raise ValueError("8-mode payload bad size")
-                head = np.frombuffer(payload, dtype=np.int16, count=2, offset=0).reshape(1,2).astype(np.int32)
-                k = (len(payload)-4)//2
-                deltas = np.frombuffer(payload, dtype=np.int8,  count=2*k, offset=4).reshape(k,2).astype(np.int32)
-                pts = np.empty((1+k, 2), dtype=np.int32)
-                pts[0] = head[0]
-                if k:
-                    pts[1:] = head[0] + np.cumsum(deltas, axis=0)
-                pts = pts.astype(np.int16)
+            # Create BitStream from the received payload bytes
+            s = BitStream(bytes=payload)
+            
+            # Read the head point (absolute, 16-bit signed x and y)
+            try:
+                head_x = s.read('int:16')
+                head_y = s.read('int:16')
+            except ReadError:
+                raise ValueError("Payload too short for head point")
 
-            elif mode_u8 == ord('6'):
-                if len(payload) < 4 or (len(payload)-4) % 4 != 0:
-                    raise ValueError("6-mode payload bad size")
-                head = np.frombuffer(payload, dtype=np.int16, count=2, offset=0).reshape(1,2).astype(np.int32)
-                k = (len(payload)-4)//4
-                deltas = np.frombuffer(payload, dtype=np.int16, count=2*k, offset=4).reshape(k,2).astype(np.int32)
-                pts = np.empty((1+k, 2), dtype=np.int32)
-                pts[0] = head[0]
-                if k:
-                    pts[1:] = head[0] + np.cumsum(deltas, axis=0)
-                pts = pts.astype(np.int16)
+            head = np.array([[head_x, head_y]], dtype=np.int32)
 
+            # Read all delta pairs using the determined bit length
+            delta_format = f'int:{mode_len}'
+            deltas_list = []
+            while s.pos < s.len: # While there are still bits left to read
+                try:
+                    dx = s.read(delta_format)
+                    dy = s.read(delta_format)
+                    deltas_list.append([dx, dy])
+                except ReadError:
+                    break 
+            
+            # Reconstruct points
+            if not deltas_list:
+                # Only head point was sent/read
+                pts = head.astype(np.int16)
             else:
-                raise ValueError(f"unknown mode {mode_u8!r}")
+                deltas = np.array(deltas_list, dtype=np.int32)
+                pts = np.empty((1 + len(deltas), 2), dtype=np.int32)
+                pts[0] = head[0]
+                pts[1:] = head[0] + np.cumsum(deltas, axis=0)
+                pts = pts.astype(np.int16)
 
+            # Clipping remains the same
             pts = np.clip(pts, [0,0], [511,511]).astype(np.int32)
             cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
 
