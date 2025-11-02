@@ -129,10 +129,6 @@ if __name__ == "__main__":
             cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
 
             contours_in_frame += 1
-            cv2.putText(canvas, f"F {current_frame_id}", (8, 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, 255, 1, cv2.LINE_AA)
-            cv2.putText(canvas, f"Contours {contours_in_frame}", (8, 44),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, 255, 1, cv2.LINE_AA)
 
         except Exception as e:
             print(f"[Receiver-UDP] decode error: {e}")

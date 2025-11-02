@@ -68,10 +68,18 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times['find_contours'] = time.time() - start
 
     start = time.time()
-    simplified_all = [simplify_boundary(b, epsilon=3.0) for b in valid_contours]
-    simplified_all = [s for s in simplified_all if len(s.shape) == 2 and s.shape[0] >= 3]
+    simplified_initial = [simplify_boundary(b, epsilon=3.0) for b in valid_contours]
+
+    simplified_all = []
+    valid_original_indices = []
+
+    for idx, s in enumerate(simplified_initial):
+        if len(s.shape) == 2 and s.shape[0] >= 3:
+            simplified_all.append(s)
+            valid_original_indices.append(idx)
+
     if not simplified_all:
-        simplified = []
+            simplified = []
     else:
         def _geom_len(poly: np.ndarray) -> float:
             d = np.diff(poly.astype(np.float32), axis=0)
@@ -121,7 +129,44 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                 selected_idx.extend(grab)
                 need -= len(grab)
                 if need <= 0: break
-        simplified = [simplified_all[i] for i in selected_idx]
+
+        TARGET_POINTS = 20 # Max points per contour
+        MAX_EPSILON = 6  # Safety break to prevent infinite loops
+        STEP_EPSILON = 0.5   # How much to increase epsilon each time
+
+        simplified = []
+        for i in selected_idx:
+            # Get the contour that passed the filter (simplified with epsilon=3.0)
+            pts = simplified_all[i]
+            
+            # If it's already "cheap" (<= 20 points), just use it.
+            if pts.shape[0] <= TARGET_POINTS:
+                simplified.append(pts)
+            else:
+                correct_original_index = valid_original_indices[i]
+                original_contour = valid_contours[correct_original_index]
+                current_epsilon = 3.0 + STEP_EPSILON
+
+                last_valid_pts = pts 
+
+                while current_epsilon < MAX_EPSILON:
+                    new_pts = simplify_boundary(original_contour, epsilon=current_epsilon)
+                    
+                    if new_pts.shape[0] < 3:
+                        pts = last_valid_pts 
+                        break
+
+                    last_valid_pts = new_pts 
+                    pts = new_pts            
+
+                    if new_pts.shape[0] <= TARGET_POINTS:
+                        break
+
+                    current_epsilon += STEP_EPSILON
+
+                if pts.shape[0] >= 3:
+                    simplified.append(pts)
+
     times['simplification'] = time.time() - start
 
     total_t = sum(times.values())
@@ -204,7 +249,7 @@ if __name__ == "__main__":
             t_capture = time.time() - t0
 
         t1 = time.time()
-        contours = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
+        contours_final = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
         t_encode = time.time() - t1
 
         full_A = full_8 = full_6 = 0
@@ -219,7 +264,7 @@ if __name__ == "__main__":
         mode_map = {6: 0, 8: 1, 10: 2, 16: 3}
         mode_counts = {6:0, 8:0, 10:0, 16:0} # For stats
 
-        for pts in contours:
+        for pts in contours_final:
             pts = pts.astype(np.int16)
             mode, head, deltas = encode_contour_relative(pts)
             
@@ -251,7 +296,7 @@ if __name__ == "__main__":
             sock.sendto(packet_payload, (HOST, PORT))
         end_pack_and_send_all = time.time() - start_pack_and_send_all
 
-        num_contours = len(contours)
+        num_contours = len(contours_final)
         sent_count = sum(mode_counts.values())
         print(
             f"[SENDER-STATS] "
