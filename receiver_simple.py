@@ -126,7 +126,7 @@ if __name__ == "__main__":
 
             # Clipping remains the same
             pts = np.clip(pts, [0,0], [511,511]).astype(np.int32)
-            cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
+            cv2.polylines(canvas, [pts.reshape(-1,1,2)], False, 255, 1)
 
             contours_in_frame += 1
 
