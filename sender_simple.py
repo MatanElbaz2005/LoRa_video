@@ -142,7 +142,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     
     graph = sknw.build_sknw(img_skeleton, multi=False)
     
-    # New logic: Traverse graph to merge connected lines
+    # Traverse graph to merge connected lines
     raw_lines_yx = traverse_graph_to_paths(graph)
     
     # sknw coordinates are (y, x), flip them to (x, y) for OpenCV
@@ -157,7 +157,8 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     valid_original_indices = []
 
     for idx, s in enumerate(simplified_initial):
-        if len(s.shape) == 2 and s.shape[0] >= 2:
+        # Filter out contours with 2 points or less
+        if len(s.shape) == 2 and s.shape[0] > 2:
             simplified_all.append(s)
             valid_original_indices.append(idx)
 
