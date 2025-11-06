@@ -4,9 +4,6 @@ import time
 import socket
 import struct
 from bitstring import BitStream
-from skimage.morphology import skeletonize
-import sknw
-import networkx as nx
 try:
     from picamera2 import Picamera2
 except Exception:
@@ -20,7 +17,7 @@ PICAM2_FORMAT = "RGB888"
 
 def simplify_boundary(boundary, epsilon=3.0):
     boundary = boundary.astype(np.float32)
-    simp = cv2.approxPolyDP(boundary, epsilon=epsilon, closed=False)
+    simp = cv2.approxPolyDP(boundary, epsilon=epsilon, closed=True)
     return np.ascontiguousarray(simp.squeeze())
 
 def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
@@ -29,77 +26,6 @@ def auto_canny(img_u8: np.ndarray, sigma: float = 0.33,
     lower = int(max(0, (1.0 - sigma) * v))
     upper = int(min(255, (1.0 + sigma) * v))
     return cv2.Canny(img_u8, lower, upper, apertureSize=aperture_size, L2gradient=l2)
-
-def _get_edge_pts(G, u, v):
-    """Helper to get edge points in the correct order (u -> v)."""
-    pts = G[u][v]['pts']
-    # 'o' is the coordinate of the node
-    u_coord = G.nodes[u]['o'] 
-    
-    # Check if the first point of the edge path matches u
-    if np.array_equal(pts[0], u_coord):
-        return pts
-    else:
-        # If not, the path is stored as v -> u, so flip it
-        return np.flip(pts, axis=0)
-
-def _traverse_component(G, node, visited_edges):
-    """Recursive DFS function implementing the 'go-and-return' logic."""
-    path = []
-    
-    for neighbor in G.neighbors(node):
-        # Use a sorted tuple as a unique key for the undirected edge
-        edge_key = tuple(sorted((node, neighbor)))
-        
-        if edge_key not in visited_edges:
-            visited_edges.add(edge_key)
-            
-            # Get paths in (u -> v) and (v -> u) directions
-            pts_to = _get_edge_pts(G, node, neighbor)
-            pts_from = np.flip(pts_to, axis=0)
-            
-            # 1. Go To: Add path from node to neighbor
-            path.extend(pts_to[1:]) # [1:] to avoid duplicating the node
-            
-            # 2. Recurse: Explore from the neighbor
-            path.extend(_traverse_component(G, neighbor, visited_edges))
-            
-            # 3. Return: Add path from neighbor back to node
-            path.extend(pts_from[1:]) # [1:] to avoid duplicating the node
-            
-    return path
-
-def traverse_graph_to_paths(G):
-    """
-    Main function to traverse the graph G and convert each
-    connected component into a single continuous path.
-    """
-    raw_lines = []
-    
-    # Iterate over each disconnected component
-    for component in nx.connected_components(G):
-        if not component:
-            continue
-            
-        comp_G = G.subgraph(component)
-        
-        # Pick a random node to start the traversal
-        start_node = list(comp_G.nodes)[0]
-        
-        # Track visited edges *per component*
-        visited_edges = set() 
-        
-        # The path starts with the coordinate of the first node
-        start_coord = comp_G.nodes[start_node]['o']
-        
-        # Build the full 'go-and-return' path for this component
-        full_path_coords = [start_coord]
-        full_path_coords.extend(_traverse_component(comp_G, start_node, visited_edges))
-        
-        # Add the final continuous path to our list
-        raw_lines.append(np.array(full_path_coords))
-        
-    return raw_lines
 
 def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times = {}
@@ -137,28 +63,18 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times['morph_close'] = time.time() - start
 
     start = time.time()
-    img_skeleton_bool = skeletonize(img_binary > 0)
-    img_skeleton = (img_skeleton_bool.astype(np.uint8) * 255)
-    
-    graph = sknw.build_sknw(img_skeleton, multi=False)
-    
-    # Traverse graph to merge connected lines
-    raw_lines_yx = traverse_graph_to_paths(graph)
-    
-    # sknw coordinates are (y, x), flip them to (x, y) for OpenCV
-    raw_lines = [np.flip(line, axis=1) for line in raw_lines_yx]
-
-    times['skeleton_and_graph'] = time.time() - start
+    contours, _ = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    valid_contours = [c.squeeze().astype(np.float32) for c in contours if len(c) > 2]
+    times['find_contours'] = time.time() - start
 
     start = time.time()
-    simplified_initial = [simplify_boundary(line.astype(np.float32), epsilon=3.0) for line in raw_lines]
+    simplified_initial = [simplify_boundary(b, epsilon=3.0) for b in valid_contours]
 
     simplified_all = []
     valid_original_indices = []
 
     for idx, s in enumerate(simplified_initial):
-        # Filter out contours with 2 points or less
-        if len(s.shape) == 2 and s.shape[0] > 2:
+        if len(s.shape) == 2 and s.shape[0] >= 3:
             simplified_all.append(s)
             valid_original_indices.append(idx)
 
@@ -168,6 +84,8 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
         def _geom_len(poly: np.ndarray) -> float:
             d = np.diff(poly.astype(np.float32), axis=0)
             g = float(np.sum(np.sqrt((d**2).sum(axis=1))))
+            if poly.shape[0] >= 3:
+                g += float(np.linalg.norm(poly[-1] - poly[0]))
             return g
         lengths = np.array([_geom_len(p) for p in simplified_all], dtype=np.float32)
         points  = np.array([max(1, p.shape[0]) for p in simplified_all], dtype=np.int32)
@@ -195,8 +113,8 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
         for b in range(5):
             idxs = np.where(band_idx == b)[0]
             if idxs.size == 0: continue
-            lengths_s = np.array([lengths[i] for i in idxs], dtype=np.float32)
-            order = idxs[np.argsort(-lengths_s)]
+            areas_s = np.array([cv2.contourArea(simplified_all[i]) for i in idxs], dtype=np.float32)
+            order = idxs[np.argsort(-areas_s)]
             k = max(0, min(quotas[b], order.size))
             selected_idx.extend(order[:k].tolist())
         if len(selected_idx) < target_N:
@@ -205,8 +123,8 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
             for b in [0,1,2,3,4]:
                 idxs = [i for i in np.where(band_idx == b)[0] if i not in taken]
                 if not idxs: continue
-                lengths_s = np.array([lengths[i] for i in idxs], dtype=np.float32)
-                order = np.array(idxs)[np.argsort(-lengths_s)]
+                areas_s = np.array([cv2.contourArea(simplified_all[i]) for i in idxs], dtype=np.float32)
+                order = np.array(idxs)[np.argsort(-areas_s)]
                 grab = order[:need].tolist()
                 selected_idx.extend(grab)
                 need -= len(grab)
@@ -226,7 +144,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                 simplified.append(pts)
             else:
                 correct_original_index = valid_original_indices[i]
-                original_contour = raw_lines[correct_original_index]
+                original_contour = valid_contours[correct_original_index]
                 current_epsilon = 3.0 + STEP_EPSILON
 
                 last_valid_pts = pts 
@@ -234,7 +152,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                 while current_epsilon < MAX_EPSILON:
                     new_pts = simplify_boundary(original_contour, epsilon=current_epsilon)
                     
-                    if new_pts.shape[0] < 2:
+                    if new_pts.shape[0] < 3:
                         pts = last_valid_pts 
                         break
 
@@ -246,7 +164,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
                     current_epsilon += STEP_EPSILON
 
-                if pts.shape[0] >= 2:
+                if pts.shape[0] >= 3:
                     simplified.append(pts)
 
     times['simplification'] = time.time() - start
@@ -345,6 +263,7 @@ if __name__ == "__main__":
         # 00: 6-bit, 01: 8-bit, 10: 10-bit, 11: 16-bit
         mode_map = {6: 0, 8: 1, 10: 2, 16: 3}
         mode_counts = {6:0, 8:0, 10:0, 16:0} # For stats
+        point_counts = {6:0, 8:0, 10:0, 16:0}
 
         for pts in contours_final:
             pts = pts.astype(np.int16)
@@ -356,6 +275,7 @@ if __name__ == "__main__":
                 continue
 
             mode_counts[mode] += 1
+            point_counts[mode] += pts.shape[0]
             mode_bits = mode_map[mode]
             
             # Pack 6-bit ID and 2-bit mode into a single byte
@@ -380,13 +300,16 @@ if __name__ == "__main__":
 
         num_contours = len(contours_final)
         sent_count = sum(mode_counts.values())
+        total_points_overall = sum(point_counts.values())
         print(
             f"[SENDER-STATS] "
             f"frame={frame_id} (ID_6bit={frame_id_6bit}) "
             f"contours={num_contours} (sent={sent_count}, skipped={full_A}) "
             f"modes (6/8/10/16)={mode_counts[6]}/{mode_counts[8]}/{mode_counts[10]}/{mode_counts[16]} "
+            f"total_points={total_points_overall} "
+            f"points (6/8/10/16)={point_counts[6]}/{point_counts[8]}/{point_counts[10]}/{point_counts[16]} "
             f"total_KB={(total_bytes_sent / 1024.0):.1f}"
-             )
+            )
 
         t_total = time.time() - t_cycle
         t_known = t_capture + t_encode + end_pack_and_send_all
