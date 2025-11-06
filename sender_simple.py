@@ -63,8 +63,23 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times['morph_close'] = time.time() - start
 
     start = time.time()
-    contours, _ = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
-    valid_contours = [c.squeeze().astype(np.float32) for c in contours if len(c) > 2]
+    contours, hierarchy = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    dropped_contours_count = 0
+    
+    if contours is None or hierarchy is None:
+        valid_contours = []
+        original_indices_map_vc = []
+        hierarchy = None
+    else:
+        hierarchy = hierarchy[0] 
+        valid_contours = []
+        original_indices_map_vc = []
+        
+        for i, contour in enumerate(contours):
+            if len(contour) > 2:
+                valid_contours.append(contour.squeeze().astype(np.float32))
+                original_indices_map_vc.append(i)
+    
     times['find_contours'] = time.time() - start
 
     start = time.time()
@@ -72,11 +87,13 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
     simplified_all = []
     valid_original_indices = []
+    original_indices_map_sa = []
 
     for idx, s in enumerate(simplified_initial):
         if len(s.shape) == 2 and s.shape[0] >= 3:
             simplified_all.append(s)
             valid_original_indices.append(idx)
+            original_indices_map_sa.append(original_indices_map_vc[idx])
 
     if not simplified_all:
             simplified = []
@@ -129,13 +146,55 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                 selected_idx.extend(grab)
                 need -= len(grab)
                 if need <= 0: break
+        
+        final_selected_indices_in_sa = []
+        DISTANCE_THRESHOLD = 10.0
+        set_of_selected_original_indices = {original_indices_map_sa[i] for i in selected_idx}
+
+        if hierarchy is not None:
+            for sa_index in selected_idx:
+                original_idx = original_indices_map_sa[sa_index]
+                parent_index = hierarchy[original_idx][3]
+                is_inner_hole = (parent_index != -1)
+
+                if not is_inner_hole:
+                    final_selected_indices_in_sa.append(sa_index)
+                    continue
+
+                if parent_index not in set_of_selected_original_indices:
+                    final_selected_indices_in_sa.append(sa_index)
+                    continue
+                
+                outer_contour = contours[parent_index]
+                inner_contour = contours[original_idx]
+                is_redundant = True
+                
+                inner_points = inner_contour.squeeze()
+                if inner_points.ndim == 1:
+                    inner_points = np.array([inner_points])
+                
+                if inner_points.size == 0:
+                    continue
+                
+                for pt in inner_points:
+                    dist = cv2.pointPolygonTest(outer_contour, tuple(pt.astype(float)), measureDist=True)
+                    if abs(dist) > DISTANCE_THRESHOLD:
+                        is_redundant = False
+                        break
+                
+                if is_redundant:
+                    dropped_contours_count += 1
+                else:
+                    final_selected_indices_in_sa.append(sa_index)
+        else:
+            final_selected_indices_in_sa = selected_idx
 
         TARGET_POINTS = 20 # Max points per contour
         MAX_EPSILON = 6  # Safety break to prevent infinite loops
         STEP_EPSILON = 0.5   # How much to increase epsilon each time
 
         simplified = []
-        for i in selected_idx:
+        for i in final_selected_indices_in_sa:
             # Get the contour that passed the filter (simplified with epsilon=3.0)
             pts = simplified_all[i]
             
@@ -173,7 +232,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     ordered = [(k, times[k]) for k in sorted(times.keys())]
     breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
     print(f"[ENCODE breakdown] total={total_t*1000:.1f}ms {breakdown}")
-    return simplified
+    return simplified, dropped_contours_count
 
 def encode_contour_relative(pts_i16: np.ndarray):
     # This function returns the mode (int 6, 8, 10, or 16) and the raw deltas array
@@ -249,7 +308,7 @@ if __name__ == "__main__":
             t_capture = time.time() - t0
 
         t1 = time.time()
-        contours_final = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
+        contours_final, dropped_count = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
         t_encode = time.time() - t1
 
         full_A = full_8 = full_6 = 0
@@ -304,7 +363,7 @@ if __name__ == "__main__":
         print(
             f"[SENDER-STATS] "
             f"frame={frame_id} (ID_6bit={frame_id_6bit}) "
-            f"contours={num_contours} (sent={sent_count}, skipped={full_A}) "
+            f"contours={num_contours} (sent={sent_count}, skipped={full_A}, dropped_dist={dropped_count}) "
             f"modes (6/8/10/16)={mode_counts[6]}/{mode_counts[8]}/{mode_counts[10]}/{mode_counts[16]} "
             f"total_points={total_points_overall} "
             f"points (6/8/10/16)={point_counts[6]}/{point_counts[8]}/{point_counts[10]}/{point_counts[16]} "
