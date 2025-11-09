@@ -15,6 +15,10 @@ CAMERA_BACKEND = "OPENCV"
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
 
+USE_CANNY = True
+USE_LAP = True
+USE_SCHARR = True
+
 def simplify_boundary(boundary, epsilon=3.0):
     boundary = boundary.astype(np.float32)
     simp = cv2.approxPolyDP(boundary, epsilon=epsilon, closed=True)
@@ -44,17 +48,37 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     times['clahe'] = time.time() - start
 
     start = time.time()
-    lap = cv2.Laplacian(img_clahe, cv2.CV_64F)
-    lap_abs = np.abs(lap)
-    thresh = np.percentile(lap_abs, 95)
-    _, lap_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
-    edges_canny = auto_canny(cv2.GaussianBlur(img_clahe, (3, 3), 0))
-    gx = cv2.Scharr(img_clahe, cv2.CV_32F, 1, 0)
-    gy = cv2.Scharr(img_clahe, cv2.CV_32F, 0, 1)
-    scharr_mag = cv2.magnitude(gx, gy)
-    scharr_t = np.percentile(scharr_mag, float(scharr_percentile))
-    scharr_bin = (scharr_mag >= scharr_t).astype(np.uint8) * 255
-    img_binary = cv2.bitwise_or(cv2.bitwise_or(lap_binary, edges_canny), scharr_bin)
+    
+    is_default_case = not (USE_CANNY or USE_LAP or USE_SCHARR)
+    
+    active_edges = []
+
+    if USE_LAP and not is_default_case:
+        lap = cv2.Laplacian(img_clahe, cv2.CV_64F)
+        lap_abs = np.abs(lap)
+        thresh = np.percentile(lap_abs, 95)
+        _, lap_binary = cv2.threshold(lap_abs.astype(np.uint8), int(thresh), 255, cv2.THRESH_BINARY)
+        active_edges.append(lap_binary)
+
+    if USE_CANNY or is_default_case:
+        edges_canny = auto_canny(cv2.GaussianBlur(img_clahe, (3, 3), 0))
+        active_edges.append(edges_canny)
+
+    if USE_SCHARR and not is_default_case:
+        gx = cv2.Scharr(img_clahe, cv2.CV_32F, 1, 0)
+        gy = cv2.Scharr(img_clahe, cv2.CV_32F, 0, 1)
+        scharr_mag = cv2.magnitude(gx, gy)
+        scharr_t = np.percentile(scharr_mag, float(scharr_percentile))
+        scharr_bin = (scharr_mag >= scharr_t).astype(np.uint8) * 255
+        active_edges.append(scharr_bin)
+
+    if not active_edges:
+        img_binary = np.zeros_like(img_clahe, dtype=np.uint8)
+    else:
+        img_binary = active_edges[0]
+        for i in range(1, len(active_edges)):
+            img_binary = cv2.bitwise_or(img_binary, active_edges[i])
+            
     times['edge_detection'] = time.time() - start
 
     start = time.time()
