@@ -5,11 +5,16 @@ import socket
 import struct
 from bitstring import BitStream
 try:
+    import cv2.ximgproc
+except ImportError:
+    print("Warning: cv2.ximgproc not found. Thinning will be skipped.")
+    print("Please run: pip install opencv-contrib-python")
+try:
     from picamera2 import Picamera2
 except Exception:
     Picamera2 = None
 
-VIDEO_MODE = True
+VIDEO_MODE = False
 VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
 CAMERA_BACKEND = "OPENCV"
 PICAM2_SIZE = (640, 480)
@@ -83,11 +88,20 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
     start = time.time()
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    img_binary = cv2.morphologyEx(img_binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+    img_binary_closed = cv2.morphologyEx(img_binary, cv2.MORPH_CLOSE, kernel, iterations=1)
     times['morph_close'] = time.time() - start
 
     start = time.time()
-    contours, hierarchy = cv2.findContours(img_binary, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    try:
+        img_binary_thinned = cv2.ximgproc.thinning(img_binary_closed)
+        times['thinning'] = time.time() - start
+    except Exception:
+        print("failed to thinning the binary img")
+        img_binary_thinned = img_binary_closed
+        times['thinning'] = 0.0
+
+    start = time.time()
+    contours, hierarchy = cv2.findContours(img_binary_thinned, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     dropped_contours_count = 0
     
     if contours is None or hierarchy is None:
