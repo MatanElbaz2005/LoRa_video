@@ -93,10 +93,11 @@ def calculate_final_stats(contours_final):
     return total_points_overall, (total_bytes_sent / 1024.0)
 
 def add_stats_to_canvas(canvas, stats):
-    before, after, pixels, kb = stats
+    before, after, pixels, kb, converted = stats
     
-    cv2.putText(canvas, f"Contours (Pre-Echo): {before}", (10, 512 - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
-    cv2.putText(canvas, f"Contours (Final): {after}", (10, 512 - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(canvas, f"Contours (Pre-Echo): {before}", (10, 512 - 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+    cv2.putText(canvas, f"Contours (Final): {after}", (10, 512 - 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    cv2.putText(canvas, f"Converted to Lines: {converted}", (10, 512 - 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
     cv2.putText(canvas, f"Total Points: {pixels}", (10, 512 - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     cv2.putText(canvas, f"Total KB: {kb:.2f}", (10, 512 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
     return canvas
@@ -157,7 +158,7 @@ def process_contours_pipeline(binary_input, percentile_pin=50):
     dropped_contours_count = 0
     
     if contours is None or hierarchy is None:
-        stats = (0, 0, 0, 0.0)
+        stats = (0, 0, 0, 0.0, 0)
         return debug_canvas, stats
 
     hierarchy = hierarchy[0] 
@@ -182,7 +183,7 @@ def process_contours_pipeline(binary_input, percentile_pin=50):
             original_indices_map_sa.append(original_indices_map_vc[idx])
 
     if not simplified_all:
-        stats = (0, 0, 0, 0.0)
+        stats = (0, 0, 0, 0.0, 0)
         return debug_canvas, stats
     
     lengths = np.array([_geom_len(p) for p in simplified_all], dtype=np.float32)
@@ -307,12 +308,38 @@ def process_contours_pipeline(binary_input, percentile_pin=50):
             if pts.shape[0] >= 3:
                 simplified.append(pts)
 
-    stats_total_pixels, stats_total_kb = calculate_final_stats(simplified)
-    stats = (stats_before_drop, stats_after_drop, stats_total_pixels, stats_total_kb)
+    final_contours_for_stats = []
+    final_contours_for_drawing = []
+    THINNESS_THRESHOLD = 0.5
+    converted_to_lines = 0
+
+    for pts in simplified:
+        area = cv2.contourArea(pts)
+        perimeter = cv2.arcLength(pts, True)
+        ratio = area / (perimeter + 1e-6)
+
+        if ratio < THINNESS_THRESHOLD and len(pts) > 3:
+            mid_index = len(pts) // 2
+            pts_open = pts[0 : mid_index + 1]
+            
+            if len(pts_open) < 2:
+                final_contours_for_stats.append(pts)
+                final_contours_for_drawing.append((pts, True))
+            else:
+                final_contours_for_stats.append(pts_open)
+                final_contours_for_drawing.append((pts_open, False))
+                converted_to_lines += 1
+        else:
+            final_contours_for_stats.append(pts)
+            final_contours_for_drawing.append((pts, True))
+
+    stats_total_pixels, stats_total_kb = calculate_final_stats(final_contours_for_stats)
+    stats = (stats_before_drop, stats_after_drop, stats_total_pixels, stats_total_kb, converted_to_lines)
 
     try:
-        if simplified:
-            cv2.polylines(debug_canvas, [pts.astype(np.int32) for pts in simplified], isClosed=True, color=(255, 255, 255), thickness=1)
+        for pts, is_closed in final_contours_for_drawing:
+            cv2.polylines(debug_canvas, [pts.astype(np.int32)], isClosed=is_closed, color=(255, 255, 255), thickness=1)
+            
         if dropped_contours_simplified:
             cv2.polylines(debug_canvas, [pts.astype(np.int32) for pts in dropped_contours_simplified], isClosed=True, color=(0, 0, 255), thickness=1)
     except Exception as e:
