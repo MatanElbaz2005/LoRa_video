@@ -246,16 +246,16 @@ def encode_contour_relative(pts_i16: np.ndarray):
     deltas = (curr - prev) # Keep deltas as int32 numpy array
     max_abs = int(np.max(np.abs(deltas))) if deltas.size else 0
 
-    if max_abs <= 31:      # Range for sint:6 is [-32, 31]
+    if max_abs <= 7:       # Range for sint:4 is [-8, 7]
+        mode = 4
+    elif max_abs <= 31:    # Range for sint:6 is [-32, 31]
         mode = 6
     elif max_abs <= 127:   # Range for sint:8 is [-128, 127]
         mode = 8
     elif max_abs <= 511:   # Range for sint:10 is [-512, 511]
         mode = 10
-    elif max_abs <= 32767: # Range for sint:16 is [-32768, 32767]
-        mode = 16
     else:
-        # Deltas too large, cannot encode
+        # Deltas too large (> 511), cannot encode
         return None, None, None
         
     return mode, head, deltas
@@ -319,10 +319,10 @@ if __name__ == "__main__":
         frame_id_6bit = frame_id % 64
 
         # Define mode mapping to 2-bit flags
-        # 00: 6-bit, 01: 8-bit, 10: 10-bit, 11: 16-bit
-        mode_map = {6: 0, 8: 1, 10: 2, 16: 3}
-        mode_counts = {6:0, 8:0, 10:0, 16:0} # For stats
-        point_counts = {6:0, 8:0, 10:0, 16:0}
+        # 00: 4-bit, 01: 6-bit, 10: 8-bit, 11: 10-bit
+        mode_map = {4: 0, 6: 1, 8: 2, 10: 3}
+        mode_counts = {4:0, 6:0, 8:0, 10:0} # For stats
+        point_counts = {4:0, 6:0, 8:0, 10:0}
 
         for pts in contours_final:
             pts = pts.astype(np.int16)
@@ -364,9 +364,9 @@ if __name__ == "__main__":
             f"[SENDER-STATS] "
             f"frame={frame_id} (ID_6bit={frame_id_6bit}) "
             f"contours={num_contours} (sent={sent_count}, skipped={full_A}, dropped_dist={dropped_count}) "
-            f"modes (6/8/10/16)={mode_counts[6]}/{mode_counts[8]}/{mode_counts[10]}/{mode_counts[16]} "
+            f"modes (4/6/8/10)={mode_counts[4]}/{mode_counts[6]}/{mode_counts[8]}/{mode_counts[10]} "
             f"total_points={total_points_overall} "
-            f"points (6/8/10/16)={point_counts[6]}/{point_counts[8]}/{point_counts[10]}/{point_counts[16]} "
+            f"points (4/6/8/10)={point_counts[4]}/{point_counts[6]}/{point_counts[8]}/{point_counts[10]} "
             f"total_KB={(total_bytes_sent / 1024.0):.1f}"
             )
 

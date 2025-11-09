@@ -45,7 +45,7 @@ if __name__ == "__main__":
         mode_bits = header_byte & 0x03 # Get last 2 bits
         
         # Map mode_bits to bit length (inverse of sender map)
-        mode_len_map = {0: 6, 1: 8, 2: 10, 3: 16}
+        mode_len_map = {0: 4, 1: 6, 2: 8, 3: 10}
         if mode_bits not in mode_len_map:
              print(f"[Receiver-UDP] Received packet with invalid mode_bits={mode_bits}. Discarding.")
              continue
