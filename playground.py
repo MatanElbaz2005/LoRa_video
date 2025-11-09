@@ -319,9 +319,33 @@ def process_contours_pipeline(binary_input, percentile_pin=50):
         ratio = area / (perimeter + 1e-6)
 
         if ratio < THINNESS_THRESHOLD and len(pts) > 3:
-            mid_index = len(pts) // 2
-            pts_open = pts[0 : mid_index + 1]
+            rect = cv2.minAreaRect(pts.astype(np.float32))
+            box = cv2.boxPoints(rect)
+
+            dist1 = np.linalg.norm(box[0] - box[1])
+            dist2 = np.linalg.norm(box[1] - box[2])
             
+            if dist1 > dist2:
+                end1 = (box[0] + box[3]) / 2.0
+                end2 = (box[1] + box[2]) / 2.0
+            else:
+                end1 = (box[0] + box[1]) / 2.0
+                end2 = (box[2] + box[3]) / 2.0
+            
+            start_idx = np.argmin(np.sum((pts - end1)**2, axis=1))
+            end_idx = np.argmin(np.sum((pts - end2)**2, axis=1))
+            
+            i1 = min(start_idx, end_idx)
+            i2 = max(start_idx, end_idx)
+            
+            path1_len = i2 - i1
+            path2_len = (len(pts) - i2) + i1
+            
+            if path1_len > path2_len:
+                pts_open = pts[i1 : i2 + 1]
+            else:
+                pts_open = np.concatenate((pts[i2:], pts[:i1 + 1]))
+
             if len(pts_open) < 2:
                 final_contours_for_stats.append(pts)
                 final_contours_for_drawing.append((pts, True))
