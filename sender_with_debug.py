@@ -52,6 +52,8 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     img_clahe = clahe.apply(img_median)
     times['clahe'] = time.time() - start
 
+    debug_canvas = np.zeros((512, 512, 3), dtype=np.uint8)
+
     start = time.time()
     
     is_default_case = not (USE_CANNY or USE_LAP or USE_SCHARR)
@@ -135,6 +137,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
 
     if not simplified_all:
             simplified = []
+            dropped_contours_simplified = []
     else:
         def _geom_len(poly: np.ndarray) -> float:
             d = np.diff(poly.astype(np.float32), axis=0)
@@ -186,6 +189,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                 if need <= 0: break
         
         final_selected_indices_in_sa = []
+        dropped_contours_simplified = []
         DISTANCE_THRESHOLD = 10.0
         set_of_selected_original_indices = {original_indices_map_sa[i] for i in selected_idx}
 
@@ -222,6 +226,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                 
                 if is_redundant:
                     dropped_contours_count += 1
+                    dropped_contours_simplified.append(simplified_all[sa_index])
                 else:
                     final_selected_indices_in_sa.append(sa_index)
         else:
@@ -270,7 +275,16 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
     ordered = [(k, times[k]) for k in sorted(times.keys())]
     breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
     print(f"[ENCODE breakdown] total={total_t*1000:.1f}ms {breakdown}")
-    return simplified, dropped_contours_count
+
+    try:
+        if simplified:
+            cv2.polylines(debug_canvas, [pts.astype(np.int32) for pts in simplified], isClosed=True, color=(255, 255, 255), thickness=1)
+        if dropped_contours_simplified:
+            cv2.polylines(debug_canvas, [pts.astype(np.int32) for pts in dropped_contours_simplified], isClosed=True, color=(0, 0, 255), thickness=1)
+    except Exception as e:
+        pass 
+
+    return simplified, dropped_contours_count, debug_canvas
 
 def encode_contour_relative(pts_i16: np.ndarray):
     # This function returns the mode (int 6, 8, 10, or 16) and the raw deltas array
@@ -346,7 +360,7 @@ if __name__ == "__main__":
             t_capture = time.time() - t0
 
         t1 = time.time()
-        contours_final, dropped_count = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
+        contours_final, dropped_count, debug_canvas = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
         t_encode = time.time() - t1
 
         full_A = full_8 = full_6 = 0
@@ -423,6 +437,11 @@ if __name__ == "__main__":
         # Calculate and print Sender FPS
         if t_total > 0:
             print(f"[SENDER-FPS] {1.0 / t_total:.1f} FPS")
+
+        cv2.imshow("Sender Debug View", debug_canvas)
+        if cv2.waitKey(1) & 0xFF == 27:
+            print("[Sender] ESC key pressed, stopping.")
+            break
 
         frame_id += 1
 
