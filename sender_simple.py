@@ -265,12 +265,56 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
                     simplified.append(pts)
 
     times['simplification'] = time.time() - start
+    
+    start = time.time()
+    final_contours_with_flags = []
+    THINNESS_THRESHOLD = 0.5
+    
+    for pts in simplified:
+        area = cv2.contourArea(pts)
+        perimeter = cv2.arcLength(pts, True)
+        ratio = area / (perimeter + 1e-6)
+
+        if ratio < THINNESS_THRESHOLD and len(pts) > 3:
+            rect = cv2.minAreaRect(pts.astype(np.float32))
+            box = cv2.boxPoints(rect)
+
+            dist1 = np.linalg.norm(box[0] - box[1])
+            dist2 = np.linalg.norm(box[1] - box[2])
+            
+            if dist1 > dist2:
+                end1 = (box[0] + box[3]) / 2.0
+                end2 = (box[1] + box[2]) / 2.0
+            else:
+                end1 = (box[0] + box[1]) / 2.0
+                end2 = (box[2] + box[3]) / 2.0
+            
+            start_idx = np.argmin(np.sum((pts - end1)**2, axis=1))
+            end_idx = np.argmin(np.sum((pts - end2)**2, axis=1))
+            
+            i1 = min(start_idx, end_idx)
+            i2 = max(start_idx, end_idx)
+            
+            path1_len = i2 - i1
+            path2_len = (len(pts) - i2) + i1
+            
+            if path1_len > path2_len:
+                pts_open = pts[i1 : i2 + 1]
+            else:
+                pts_open = np.concatenate((pts[i2:], pts[:i1 + 1]))
+
+            if len(pts_open) < 2:
+                final_contours_with_flags.append((pts, True))
+            else:
+                final_contours_with_flags.append((pts_open, False))
+        else:
+            final_contours_with_flags.append((pts, True))
+    
+    times['smart_cut'] = time.time() - start
 
     total_t = sum(times.values())
-    ordered = [(k, times[k]) for k in sorted(times.keys())]
-    breakdown = " ".join([f"{k}={v*1000:.1f}ms" for k, v in ordered])
-    print(f"[ENCODE breakdown] total={total_t*1000:.1f}ms {breakdown}")
-    return simplified, dropped_contours_count
+    # ... (הדפסת breakdown) ...
+    return final_contours_with_flags, dropped_contours_count
 
 def encode_contour_relative(pts_i16: np.ndarray):
     # This function returns the mode (int 6, 8, 10, or 16) and the raw deltas array
@@ -346,37 +390,38 @@ if __name__ == "__main__":
             t_capture = time.time() - t0
 
         t1 = time.time()
-        contours_final, dropped_count = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
+        contours_final_with_flags, dropped_count = encode_frame(frame, percentile_pin=50, scharr_percentile=92)
         t_encode = time.time() - t1
 
         full_A = full_8 = full_6 = 0
         total_bytes_sent = 0
         start_pack_and_send_all = time.time()
         
-        # Use 6 bits for frame_id, wrapping around at 64
-        frame_id_6bit = frame_id % 64
+        frame_id_5bit = frame_id % 32
 
-        # Define mode mapping to 2-bit flags
-        # 00: 4-bit, 01: 6-bit, 10: 8-bit, 11: 10-bit
         mode_map = {4: 0, 6: 1, 8: 2, 10: 3}
         mode_counts = {4:0, 6:0, 8:0, 10:0} # For stats
         point_counts = {4:0, 6:0, 8:0, 10:0}
+        
+        converted_count = 0
 
-        for pts in contours_final:
+        for pts, is_closed in contours_final_with_flags:
             pts = pts.astype(np.int16)
             mode, head, deltas = encode_contour_relative(pts)
             
-            # Skip contours that couldn't be encoded
             if mode is None:
-                full_A += 1 # Count as skipped
+                full_A += 1
                 continue
+            
+            if not is_closed:
+                converted_count += 1
 
             mode_counts[mode] += 1
             point_counts[mode] += pts.shape[0]
             mode_bits = mode_map[mode]
+            is_closed_bit = 1 if is_closed else 0
             
-            # Pack 6-bit ID and 2-bit mode into a single byte
-            header_byte = (frame_id_6bit << 2) | mode_bits
+            header_byte = (frame_id_5bit << 3) | (is_closed_bit << 2) | mode_bits
             
             # Create a BitStream for packing
             s = BitStream()
@@ -395,13 +440,13 @@ if __name__ == "__main__":
             sock.sendto(packet_payload, (HOST, PORT))
         end_pack_and_send_all = time.time() - start_pack_and_send_all
 
-        num_contours = len(contours_final)
+        num_contours = len(contours_final_with_flags)
         sent_count = sum(mode_counts.values())
         total_points_overall = sum(point_counts.values())
         print(
             f"[SENDER-STATS] "
-            f"frame={frame_id} (ID_6bit={frame_id_6bit}) "
-            f"contours={num_contours} (sent={sent_count}, skipped={full_A}, dropped_dist={dropped_count}) "
+            f"frame={frame_id} (ID_5bit={frame_id_5bit}) "
+            f"contours={num_contours} (sent={sent_count}, skipped={full_A}, dropped_dist={dropped_count}, converted_lines={converted_count}) "
             f"modes (4/6/8/10)={mode_counts[4]}/{mode_counts[6]}/{mode_counts[8]}/{mode_counts[10]} "
             f"total_points={total_points_overall} "
             f"points (4/6/8/10)={point_counts[4]}/{point_counts[6]}/{point_counts[8]}/{point_counts[10]} "

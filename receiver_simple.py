@@ -41,7 +41,8 @@ if __name__ == "__main__":
         
         # Unpack the 1-byte header
         header_byte = data[0]
-        frame_id = header_byte >> 2  # Get first 6 bits
+        frame_id = header_byte >> 3  # Get first 5 bits
+        is_closed = (header_byte & 0x04) != 0 # Get 1 bit (00000100)
         mode_bits = header_byte & 0x03 # Get last 2 bits
         
         # Map mode_bits to bit length (inverse of sender map)
@@ -57,12 +58,12 @@ if __name__ == "__main__":
         if current_frame_id == -1:
             current_frame_id = frame_id
 
-        # 6-bit sequence arithmetic logic with a 32-frame window
-        diff = (frame_id - current_frame_id + 64) % 64
+        # 5-bit sequence arithmetic logic with a 16-frame window
+        diff = (frame_id - current_frame_id + 32) % 32
 
         if diff == 0:
             pass
-        elif diff < 32:
+        elif diff < 16:
             # Display the *previous* frame, which is now complete
             if current_frame_id >= 0:
                 # Calculate time since last display
@@ -126,7 +127,7 @@ if __name__ == "__main__":
 
             # Clipping remains the same
             pts = np.clip(pts, [0,0], [511,511]).astype(np.int32)
-            cv2.polylines(canvas, [pts.reshape(-1,1,2)], True, 255, 1)
+            cv2.polylines(canvas, [pts.reshape(-1,1,2)], is_closed, 255, 1)
 
             contours_in_frame += 1
 
