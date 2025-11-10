@@ -14,9 +14,9 @@ try:
 except Exception:
     Picamera2 = None
 
-VIDEO_MODE = True
+VIDEO_MODE = False
 VIDEO_PATH = r"C:\Users\Matan\Documents\Matan\LoRa_video\videos\DJI_0008.MOV"
-CAMERA_BACKEND = "OPENCV"
+CAMERA_BACKEND = "PICAM2"
 PICAM2_SIZE = (640, 480)
 PICAM2_FORMAT = "RGB888"
 
@@ -360,7 +360,7 @@ if __name__ == "__main__":
             cap = cv2.VideoCapture(0)
             input_desc = "LIVE camera (OpenCV)"
 
-    HOST = "127.0.0.1"
+    HOST = "192.168.8.100"
     PORT = 5001
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     print(f"[Sender-UDP] Target {HOST}:{PORT}")
