@@ -278,7 +278,7 @@ def process_contours_pipeline(binary_input, percentile_pin=50, use_smart_cut=Fal
     stats_after_drop = len(final_selected_indices_in_sa)
 
     TARGET_POINTS = 20
-    MAX_EPSILON = 6
+    MAX_EPSILON = 10
     STEP_EPSILON = 0.5
 
     simplified = []

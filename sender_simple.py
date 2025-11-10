@@ -228,7 +228,7 @@ def encode_frame(frame, percentile_pin=50, scharr_percentile=92):
             final_selected_indices_in_sa = selected_idx
 
         TARGET_POINTS = 20 # Max points per contour
-        MAX_EPSILON = 6  # Safety break to prevent infinite loops
+        MAX_EPSILON = 10  # Safety break to prevent infinite loops
         STEP_EPSILON = 0.5   # How much to increase epsilon each time
 
         simplified = []

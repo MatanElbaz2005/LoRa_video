@@ -31,3 +31,8 @@ AFTER smart cut
 total_points=351 points (4/6/8/10)=0/89/133/129 total_KB=0.8
 [SENDER timing] frame=3 capture=2.0ms encode=14.9ms pack_and_send_all=5.6ms other=0.0ms total=22.5ms
 [SENDER-FPS] 44.4 FPS
+AFTER max epsilon 10
+[SENDER-STATS] frame=3 (ID_5bit=3) contours=31 (sent=31, skipped=0, dropped_dist=15, converted_lines=7) modes (4/6/8/10)=0/17/9/5
+total_points=295 points (4/6/8/10)=0/89/112/94 total_KB=0.7
+[SENDER timing] frame=3 capture=2.4ms encode=15.9ms pack_and_send_all=5.3ms other=0.0ms total=23.6ms
+[SENDER-FPS] 42.3 FPS
