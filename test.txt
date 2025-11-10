@@ -11,7 +11,23 @@ WITHOUT DICT
 [ZSTD ratio] raw=1679 B (1.64 KB)  ->  comp=1156 B (1.13 KB)  ratio=1.45x  saved=31.1%
 
 times:
-[SENDER-STATS] frame=3 (ID_6bit=3) contours=35 (sent=35, skipped=0) modes (6/8/10/16)=17/13/5/0 total_points=403
-points (6/8/10/16)=118/133/152/0 total_KB=0.9
-[SENDER timing] frame=3 capture=2.0ms encode=12.0ms pack_and_send_all=5.0ms other=0.0ms total=19.0ms
-[SENDER-FPS] 52.6 FPS
+BEFORE:
+[SENDER-STATS] frame=3 (ID_6bit=3) contours=32 (sent=32, skipped=0, dropped_dist=3) modes (6/8/10/16)=15/12/5/0 total_points=389
+points (6/8/10/16)=108/129/152/0 total_KB=0.9
+[SENDER timing] frame=3 capture=5.0ms encode=26.0ms pack_and_send_all=14.0ms other=0.0ms total=45.0ms
+[SENDER-FPS] 22.2 FPS
+AFTER adding 4-bit mode:
+[SENDER-STATS] frame=3 (ID_6bit=3) contours=32 (sent=32, skipped=0, dropped_dist=3) modes (4/6/8/10)=0/15/12/5 total_points=389
+points (4/6/8/10)=0/108/129/152 total_KB=0.9
+[SENDER timing] frame=3 capture=0.7ms encode=14.0ms pack_and_send_all=2.6ms other=0.0ms total=17.2ms
+[SENDER-FPS] 58.0 FPS
+AFTER adding thicking to 1 pixel + flags for canny, lap & scharr:
+[SENDER-STATS] frame=3 (ID_6bit=3) contours=31 (sent=31, skipped=0, dropped_dist=15) modes (4/6/8/10)=0/16/10/5 total_points=379
+points (4/6/8/10)=0/86/124/169 total_KB=0.9
+[SENDER timing] frame=3 capture=10.8ms encode=20.8ms pack_and_send_all=10.0ms other=1.1ms total=42.8ms
+[SENDER-FPS] 23.4 FPS
+AFTER smart cut
+[SENDER-STATS] frame=3 (ID_5bit=3) contours=31 (sent=31, skipped=0, dropped_dist=15, converted_lines=9) modes (4/6/8/10)=0/17/10/4
+total_points=351 points (4/6/8/10)=0/89/133/129 total_KB=0.8
+[SENDER timing] frame=3 capture=2.0ms encode=14.9ms pack_and_send_all=5.6ms other=0.0ms total=22.5ms
+[SENDER-FPS] 44.4 FPS
