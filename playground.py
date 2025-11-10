@@ -150,7 +150,7 @@ def preprocess_frame(frame, scharr_percentile=92):
 
     return img_binary_closed, img_binary_thinned
 
-def process_contours_pipeline(binary_input, percentile_pin=50):
+def process_contours_pipeline(binary_input, percentile_pin=50, use_smart_cut=False):
     
     debug_canvas = np.zeros((512, 512, 3), dtype=np.uint8)
     
@@ -310,51 +310,52 @@ def process_contours_pipeline(binary_input, percentile_pin=50):
 
     final_contours_for_stats = []
     final_contours_for_drawing = []
-    THINNESS_THRESHOLD = 0.5
     converted_to_lines = 0
 
-    for pts in simplified:
-        area = cv2.contourArea(pts)
-        perimeter = cv2.arcLength(pts, True)
-        ratio = area / (perimeter + 1e-6)
+    if use_smart_cut:
+        THINNESS_THRESHOLD = 0.5
+        for pts in simplified:
+            area = cv2.contourArea(pts)
+            perimeter = cv2.arcLength(pts, True)
+            ratio = area / (perimeter + 1e-6)
 
-        if ratio < THINNESS_THRESHOLD and len(pts) > 3:
-            rect = cv2.minAreaRect(pts.astype(np.float32))
-            box = cv2.boxPoints(rect)
+            if ratio < THINNESS_THRESHOLD and len(pts) > 3:
+                # ... (כל הלוגיקה של החיתוך החכם נשארת כאן) ...
+                rect = cv2.minAreaRect(pts.astype(np.float32))
+                box = cv2.boxPoints(rect)
+                dist1 = np.linalg.norm(box[0] - box[1])
+                dist2 = np.linalg.norm(box[1] - box[2])
+                if dist1 > dist2:
+                    end1 = (box[0] + box[3]) / 2.0
+                    end2 = (box[1] + box[2]) / 2.0
+                else:
+                    end1 = (box[0] + box[1]) / 2.0
+                    end2 = (box[2] + box[3]) / 2.0
+                start_idx = np.argmin(np.sum((pts - end1)**2, axis=1))
+                end_idx = np.argmin(np.sum((pts - end2)**2, axis=1))
+                i1 = min(start_idx, end_idx)
+                i2 = max(start_idx, end_idx)
+                path1_len = i2 - i1
+                path2_len = (len(pts) - i2) + i1
+                if path1_len > path2_len:
+                    pts_open = pts[i1 : i2 + 1]
+                else:
+                    pts_open = np.concatenate((pts[i2:], pts[:i1 + 1]))
 
-            dist1 = np.linalg.norm(box[0] - box[1])
-            dist2 = np.linalg.norm(box[1] - box[2])
-            
-            if dist1 > dist2:
-                end1 = (box[0] + box[3]) / 2.0
-                end2 = (box[1] + box[2]) / 2.0
+                if len(pts_open) < 2:
+                    final_contours_for_stats.append(pts)
+                    final_contours_for_drawing.append((pts, True))
+                else:
+                    final_contours_for_stats.append(pts_open)
+                    final_contours_for_drawing.append((pts_open, False))
+                    converted_to_lines += 1
             else:
-                end1 = (box[0] + box[1]) / 2.0
-                end2 = (box[2] + box[3]) / 2.0
-            
-            start_idx = np.argmin(np.sum((pts - end1)**2, axis=1))
-            end_idx = np.argmin(np.sum((pts - end2)**2, axis=1))
-            
-            i1 = min(start_idx, end_idx)
-            i2 = max(start_idx, end_idx)
-            
-            path1_len = i2 - i1
-            path2_len = (len(pts) - i2) + i1
-            
-            if path1_len > path2_len:
-                pts_open = pts[i1 : i2 + 1]
-            else:
-                pts_open = np.concatenate((pts[i2:], pts[:i1 + 1]))
-
-            if len(pts_open) < 2:
                 final_contours_for_stats.append(pts)
                 final_contours_for_drawing.append((pts, True))
-            else:
-                final_contours_for_stats.append(pts_open)
-                final_contours_for_drawing.append((pts_open, False))
-                converted_to_lines += 1
-        else:
-            final_contours_for_stats.append(pts)
+    else:
+        # This is the "Original" pipeline logic (no cutting)
+        final_contours_for_stats = simplified
+        for pts in simplified:
             final_contours_for_drawing.append((pts, True))
 
     stats_total_pixels, stats_total_kb = calculate_final_stats(final_contours_for_stats)
@@ -415,23 +416,28 @@ if __name__ == "__main__":
         # --- 1. Preprocessing (Done once) ---
         img_binary_closed, img_binary_thinned = preprocess_frame(frame)
         
-        # --- 2. Run Old Pipeline (on thick image) ---
-        canvas_old, stats_old = process_contours_pipeline(img_binary_closed)
-        canvas_old = add_stats_to_canvas(canvas_old, stats_old)
+        # --- 2. Run Original Pipeline (Thick, No Cut) ---
+        canvas_orig, stats_orig = process_contours_pipeline(img_binary_closed, use_smart_cut=False)
+        canvas_orig = add_stats_to_canvas(canvas_orig, stats_orig)
 
-        # --- 3. Run New Pipeline (on thinned image) ---
-        canvas_new, stats_new = process_contours_pipeline(img_binary_thinned)
-        canvas_new = add_stats_to_canvas(canvas_new, stats_new)
+        # --- 3. Run SmartCut Pipeline (Thick, With Cut) ---
+        canvas_smart_thick, stats_smart_thick = process_contours_pipeline(img_binary_closed, use_smart_cut=True)
+        canvas_smart_thick = add_stats_to_canvas(canvas_smart_thick, stats_smart_thick)
+
+        # --- 4. Run SmartCut Pipeline (Thinned, With Cut) ---
+        canvas_smart_thinned, stats_smart_thinned = process_contours_pipeline(img_binary_thinned, use_smart_cut=True)
+        canvas_smart_thinned = add_stats_to_canvas(canvas_smart_thinned, stats_smart_thinned)
         
         t_encode = time.time() - t1
         
-        print(f"[Debug-Pipeline-Compare] Frame: {frame_id}, Capture: {t_capture*1000:.1f}ms, Process (Both): {t_encode*1000:.1f}ms")
+        print(f"[Debug-Pipeline-Compare] Frame: {frame_id}, Capture: {t_capture*1000:.1f}ms, Process (All 3): {t_encode*1000:.1f}ms")
         
-        # --- 4. Display ---
+        # --- 5. Display ---
         cv2.imshow("1 - Binary (Thick)", img_binary_closed)
         cv2.imshow("2 - Binary (Thinned)", img_binary_thinned)
-        cv2.imshow("3 - Final (Pipeline on Thick)", canvas_old)
-        cv2.imshow("4 - Final (Pipeline on Thinned)", canvas_new)
+        cv2.imshow("3 - Final (Original Pipeline)", canvas_orig)
+        cv2.imshow("4 - Final (SmartCut on Thick)", canvas_smart_thick)
+        cv2.imshow("5 - Final (SmartCut on Thinned)", canvas_smart_thinned)
         
         key = cv2.waitKey(0)
         
